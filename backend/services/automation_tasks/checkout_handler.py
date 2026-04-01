@@ -69,7 +69,7 @@ class CheckoutHandler:
             await self.browser_manager.capture_failure_screenshot(job_id, "checkout_address_config_error")
             return False
 
-    async def select_correct_address(self, job_id: int, address_id: Optional[int] = None, retry_count: int = 0) -> bool:
+    async def select_correct_address(self, job_id: int, address_id: Optional[int] = None, retry_count: int = 0, automation_mode: str = "FLIPKART") -> bool:
         """Select the correct delivery address at cart/checkout and verify it.
         Opens the "Change" sheet, picks the configured address, and confirms selection."""
         # Load address configuration first - CRITICAL for validation
@@ -106,24 +106,28 @@ class CheckoutHandler:
             # Verify we're on the right page (cart or checkout)
             if 'viewcart' not in current_url.lower() and 'checkout' not in current_url.lower():
                 await job_queue.log_job(job_id, LogLevel.WARNING, f"Not on cart/checkout page. Current URL: {current_url}")
-                # Try to navigate to cart - default to GROCERY marketplace
-                try:
-                    await page.goto('https://www.flipkart.com/viewcart?marketplace=GROCERY', wait_until='domcontentloaded')
-                    await asyncio.sleep(1.5)
-                except Exception as nav_err:
-                    await job_queue.log_job(job_id, LogLevel.ERROR, f"Failed to navigate to cart: {nav_err}")
-                    return False
+                # Try to navigate to cart safely
+                await self._navigate_to_cart_safely(page, job_id, automation_mode)
             
-            # Additional check: ensure we're on the right marketplace cart
-            if 'viewcart' in current_url.lower():
                 # Check if marketplace param exists and is correct
-                if 'exploreMode=true' in current_url or ('marketplace=' in current_url and 'grocery' not in current_url.lower()):
-                    await job_queue.log_job(job_id, LogLevel.WARNING, f"Wrong marketplace cart detected. Redirecting to Grocery cart...")
-                    try:
-                        await page.goto('https://www.flipkart.com/viewcart?marketplace=GROCERY', wait_until='domcontentloaded')
-                        await asyncio.sleep(1.5)
-                    except Exception as nav_err:
-                        await job_queue.log_job(job_id, LogLevel.WARNING, f"Redirect to grocery cart failed: {nav_err}")
+                current_url = page.url # Update URL after navigation
+                correct_marketplace = automation_mode.lower()
+                is_wrong_marketplace = False
+                
+                if 'exploreMode=true' in current_url:
+                    is_wrong_marketplace = True
+                elif 'marketplace=' in current_url:
+                    # If it's regular Flipkart, we want it NOT to have 'grocery' or to have 'FLIPKART'
+                    if correct_marketplace == 'grocery':
+                        if 'grocery' not in current_url.lower():
+                            is_wrong_marketplace = True
+                    else:
+                        if 'grocery' in current_url.lower():
+                            is_wrong_marketplace = True
+
+                if is_wrong_marketplace:
+                    await job_queue.log_job(job_id, LogLevel.WARNING, f"Wrong marketplace cart detected. Redirecting safely to {automation_mode} cart...")
+                    await self._navigate_to_cart_safely(page, job_id, automation_mode)
             
             await job_queue.log_job(job_id, LogLevel.INFO, "Selecting delivery address at checkout…")
 
@@ -178,12 +182,20 @@ class CheckoutHandler:
                 
                 # Check if we accidentally landed on wrong cart (empty)
                 try:
-                    # Check for grocery cart indicator
-                    grocery_indicator = page.locator('text="Grocery basket"')
-                    if await grocery_indicator.count() == 0:
-                        await job_queue.log_job(job_id, LogLevel.WARNING, "Grocery basket not detected. Might be on wrong cart. Redirecting...")
-                        await page.goto('https://www.flipkart.com/viewcart?marketplace=GROCERY', wait_until='domcontentloaded')
-                        await asyncio.sleep(2.0)
+                    # Check for grocery cart indicator only if in GROCERY mode
+                    if automation_mode == "GROCERY":
+                        grocery_indicator = page.locator('text="Grocery basket"')
+                        if await grocery_indicator.count() == 0:
+                            await job_queue.log_job(job_id, LogLevel.WARNING, "Grocery basket not detected. Might be on wrong cart. Redirecting...")
+                            await page.goto('https://www.flipkart.com/viewcart?marketplace=GROCERY', wait_until='domcontentloaded')
+                            await asyncio.sleep(2.0)
+                    else:
+                        # For regular Flipkart, we might want to check for "My Cart" or similar
+                        flipkart_indicator = page.locator('text="My Cart", text="Flipkart (")')
+                        if await flipkart_indicator.count() == 0:
+                            await job_queue.log_job(job_id, LogLevel.WARNING, "Flipkart cart not detected. Might be on wrong cart. Redirecting...")
+                            await page.goto('https://www.flipkart.com/viewcart?marketplace=FLIPKART', wait_until='domcontentloaded')
+                            await asyncio.sleep(2.0)
                         
                         # Retry opening Change control after redirect
                         for sel in change_selectors:
@@ -346,6 +358,20 @@ class CheckoutHandler:
             await self.browser_manager.capture_failure_screenshot(job_id, "checkout_address_verify_error")
             return False
 
+    async def _navigate_to_cart_safely(self, page: Any, job_id: int, automation_mode: str):
+        """Navigate to Home page first, then to the Cart to bypass interstitial ads."""
+        try:
+            await job_queue.log_job(job_id, LogLevel.INFO, "🏠 Resetting navigation via Home page...")
+            await page.goto('https://www.flipkart.com/', wait_until='domcontentloaded')
+            await asyncio.sleep(1.0)
+            
+            cart_url = f'https://www.flipkart.com/viewcart?marketplace={automation_mode}'
+            await job_queue.log_job(job_id, LogLevel.INFO, f"🛒 Navigating to cart: {cart_url}")
+            await page.goto(cart_url, wait_until='domcontentloaded')
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            await job_queue.log_job(job_id, LogLevel.ERROR, f"Failed safe navigation: {str(e)}")
+
     def _is_correct_address(self, address_text: str, require_postfix: bool = False) -> bool:
         """Check if the address text matches our criteria using database settings.
         If require_postfix is True, only accept matches that contain the configured name_postfix."""
@@ -445,7 +471,42 @@ class CheckoutHandler:
             await job_queue.log_job(job_id, LogLevel.ERROR, f"Error validating cart total: {str(e)}")
             return True  # Continue on error
 
-    async def complete_checkout_process(self, job_id: int, max_cart_value: float = None, address_id: Optional[int] = None, gstin: Optional[str] = None, business_name: Optional[str] = None, steal_deal_product: Optional[str] = None) -> Dict[str, Any]:
+    async def _ensure_on_checkout_page(self, page: Any, job_id: int, automation_mode: str) -> bool:
+        """Monitor the URL to detect and recover from any late-triggered redirects during checkout (Flipkart Regular only)."""
+        if automation_mode != "FLIPKART":
+            return False
+            
+        ad_patterns = [
+            "productType=CC",
+            "fpg/cbc/store-page",
+            "utm_source=Cart_OTA",
+            "checkout/offers",
+            "cc-store-page",
+            "fpg/cbc"
+        ]
+        
+        # Check URL for promotional redirects
+        current_url = page.url
+        if any(pattern in current_url for pattern in ad_patterns):
+            await job_queue.log_job(job_id, LogLevel.WARNING, f"⚠️ Detected promotional redirect: {current_url[:100]}...")
+            await job_queue.log_job(job_id, LogLevel.INFO, "🔄 Forcing navigation back to Order Summary...")
+            await self._navigate_to_checkout_safely(page, job_id, automation_mode)
+            return True
+        
+        return False
+
+    async def _navigate_to_checkout_safely(self, page: Any, job_id: int, automation_mode: str):
+        """Navigate specifically back to the checkout sequence to bypass ads."""
+        try:
+            # We use the checkout URL directly or go via cart if needed
+            checkout_url = f'https://www.flipkart.com/checkout/init?marketplace={automation_mode}'
+            await job_queue.log_job(job_id, LogLevel.INFO, f"🛒 Navigating to checkout: {checkout_url}")
+            await page.goto(checkout_url, wait_until='domcontentloaded')
+            await asyncio.sleep(2.0)
+        except Exception as e:
+            await job_queue.log_job(job_id, LogLevel.ERROR, f"Failed safe checkout navigation: {str(e)}")
+
+    async def complete_checkout_process(self, job_id: int, max_cart_value: float = None, address_id: Optional[int] = None, gstin: Optional[str] = None, business_name: Optional[str] = None, steal_deal_product: Optional[str] = None, automation_mode: str = "FLIPKART") -> Dict[str, Any]:
         """Complete the checkout process: Apply Offers -> Steal Deals -> Validate Cart -> Order Summary -> Payments -> Place Order
 
         Returns a dict with keys: success, cart_total, basket_items, expected_delivery, order_id, message
@@ -518,73 +579,54 @@ class CheckoutHandler:
                 except Exception as e:
                     await job_queue.log_job(job_id, LogLevel.WARNING, f"Steal deal handler error: {str(e)}. Continuing...")
             
-            # Click Continue button to proceed to checkout - using multiple fallback selectors
-            # The page uses dynamically generated class names, so we use text-based selectors as primary
-            continue_selectors = [
+            # Click Continue or Place Order button to proceed to checkout
+            await job_queue.log_job(job_id, LogLevel.INFO, f"Step 1: Proceeding to checkout ({automation_mode} flow)...")
+            
+            # Select button text based on automation type
+            primary_button_text = "Place Order" if automation_mode == "FLIPKART" else "Continue"
+            
+            button_selectors = [
                 # Text-based selectors (most reliable)
-                'div:has-text("Continue"):not(:has(div:has-text("Continue")))',  # Innermost div with "Continue"
-                'text="Continue"',
-                'div.css-1rynq56:has-text("Continue")',  # The text container class from the HTML
-                # Role-based selector for button-like divs
+                f'div:has-text("{primary_button_text}"):not(:has(div:has-text("{primary_button_text}")))',
+                f'text="{primary_button_text}"',
+                f'div.css-1rynq56:has-text("{primary_button_text}")',
+                f'div[role="button"]:has-text("{primary_button_text}")',
+                # Grocery-specific Continue button
                 'div.css-175oi2r.r-1awozwy.r-1kneemv:has-text("Continue")',
-                # User-provided updated selector
-                '#container > div > div.HaReuk > div.cDeXU9 > div > div > div > div:nth-child(1) > div > div > div > div > div:nth-child(2) > div > div > div.css-175oi2r.r-13awgt0.r-eqz5dr > div.css-175oi2r.r-13awgt0.r-eqz5dr > div > div:nth-child(1) > div',
-                # Legacy selector (may still work on some pages)
-                '#container > div > div.q8WwEU > div._3zsGrb > div > div > div > div:nth-child(1) > div > div > div > div > div:nth-child(2) > div > div > div.css-175oi2r.r-13awgt0.r-eqz5dr > div:nth-child(1) > div > div:nth-child(1) > div',
+                # Regular Flipkart Place Order button
+                'button:has-text("Place Order")',
+                'div.HaReuk div.cDeXU9 button',
+                # Fallbacks from previous logic
+                'div.HaReuk > div.cDeXU9 > div > div > div > div:nth-child(1) > div > div > div > div > div:nth-child(2) > div > div > div.css-175oi2r.r-13awgt0.r-eqz5dr > div.css-175oi2r.r-13awgt0.r-eqz5dr > div > div:nth-child(1) > div',
             ]
             
-            continue_clicked = False
-            for i, continue_selector in enumerate(continue_selectors):
+            checkout_proceed_clicked = False
+            for i, selector in enumerate(button_selectors):
                 try:
-                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Attempting Continue button with strategy #{i+1}: {continue_selector[:50]}...")
-                    continue_button = page.locator(continue_selector)
-                    if await continue_button.count() > 0:
-                        # For text selectors, we might get multiple matches - use the visible one
-                        for idx in range(await continue_button.count()):
-                            btn = continue_button.nth(idx)
+                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Attempting {primary_button_text} button with strategy #{i+1}: {selector[:50]}...")
+                    btn_locator = page.locator(selector)
+                    if await btn_locator.count() > 0:
+                        for idx in range(await btn_locator.count()):
+                            btn = btn_locator.nth(idx)
                             try:
                                 if await btn.is_visible(timeout=2000):
                                     await btn.click(timeout=5000)
-                                    await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Clicked Continue button using strategy #{i+1}")
-                                    continue_clicked = True
-                                    await asyncio.sleep(3)  # Wait for checkout page to load
+                                    await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Clicked {primary_button_text} button using strategy #{i+1}")
+                                    checkout_proceed_clicked = True
+                                    await asyncio.sleep(3)
                                     break
                             except Exception:
                                 continue
-                        if continue_clicked:
+                        if checkout_proceed_clicked:
                             break
                 except Exception as e:
-                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Continue strategy #{i+1} failed: {str(e)}")
+                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Strategy #{i+1} failed: {str(e)}")
                     continue
             
-            if not continue_clicked:
-                # Last resort: try using page.get_by_text which is more flexible
-                try:
-                    await job_queue.log_job(job_id, LogLevel.INFO, "Trying get_by_text fallback for Continue button...")
-                    continue_text = page.get_by_text("Continue", exact=False)
-                    if await continue_text.count() > 0:
-                        # Find the clickable Continue button (usually the one in the bottom sticky bar)
-                        for idx in range(await continue_text.count()):
-                            btn = continue_text.nth(idx)
-                            try:
-                                if await btn.is_visible(timeout=2000):
-                                    # Check if this is the main Continue button (not "Continue shopping" etc.)
-                                    text_content = await btn.inner_text()
-                                    if text_content.strip().lower() == "continue":
-                                        await btn.click(timeout=5000)
-                                        await job_queue.log_job(job_id, LogLevel.INFO, "✅ Clicked Continue button using get_by_text fallback")
-                                        continue_clicked = True
-                                        await asyncio.sleep(3)
-                                        break
-                            except Exception:
-                                continue
-                except Exception as e:
-                    await job_queue.log_job(job_id, LogLevel.WARNING, f"get_by_text fallback failed: {str(e)}")
-            
-            if not continue_clicked:
-                await job_queue.log_job(job_id, LogLevel.ERROR, "Continue button not found with all strategies - cannot proceed to checkout")
-                await self.browser_manager.capture_failure_screenshot(job_id, "checkout_continue_not_found")
-                return {"success": False, "message": "Continue button not found"}
+            if not checkout_proceed_clicked:
+                await job_queue.log_job(job_id, LogLevel.ERROR, f"{primary_button_text} button not found with all strategies")
+                await self.browser_manager.capture_failure_screenshot(job_id, f"checkout_{primary_button_text.lower()}_not_found")
+                return {"success": False, "message": f"{primary_button_text} button not found"}
             
             # Step 0.5: Validate cart total on checkout page
             if max_cart_value:
@@ -683,8 +725,12 @@ class CheckoutHandler:
             # Step 1: Handle Order Summary page (Step 2)
             await job_queue.log_job(job_id, LogLevel.INFO, "Step 2: Processing Order Summary...")
             
-            # Wait for Order Summary page to load
-            await asyncio.sleep(2)
+            # Wait and check for promotional redirects (Flipkart only)
+            if automation_mode == "FLIPKART":
+                await asyncio.sleep(2) # Initial wait for navigation
+                await self._ensure_on_checkout_page(page, job_id, automation_mode)
+            else:
+                await asyncio.sleep(2)
 
             # Step 1.a: GST Invoice handling (optional, when provided)
             try:
@@ -818,20 +864,26 @@ class CheckoutHandler:
 
             
             # Click Continue button on Order Summary page - using multiple fallback selectors
-            # The page uses dynamically generated class names, so we use text-based selectors as primary
             order_summary_continue_selectors = [
                 # Text-based selectors (most reliable)
                 'div:has-text("Continue"):not(:has(div:has-text("Continue")))',  # Innermost div with "Continue"
                 'text="Continue"',
                 'div.css-1rynq56:has-text("Continue")',  # The text container class from the HTML
-                # Button-like div classes with yellow background (from screenshot)
+                # Button-like div classes with yellow background
                 'div.css-175oi2r.r-1awozwy.r-1kneemv:has-text("Continue")',
-                # User-provided selector from Order Summary page
+                # Specific selector for Flipkart Order Summary button
                 '#_parentCtr_ > div:nth-child(7) > div > div:nth-child(1) > div > div:nth-child(1) > div',
-                # Legacy selector
-                '#container > div > div.q8WwEU > div > div > div > div > div:nth-child(1) > div > div > div > div > div:nth-child(2) > div > div > div.css-175oi2r.r-13awgt0.r-eqz5dr > div:nth-child(1) > div > div:nth-child(1) > div',
+                # Generic role-based selectors
+                'button:has-text("Continue")',
+                'div[role="button"]:has-text("Continue")'
             ]
             
+            # If Flipkart mode is active, the button might sometimes say "Place Order" even in Step 2 
+            # (depending on direct checkout vs regular flow)
+            if automation_mode == "FLIPKART":
+                order_summary_continue_selectors.insert(0, 'div:has-text("Place Order"):not(:has(div:has-text("Place Order"))) >> visible=true')
+                order_summary_continue_selectors.insert(1, 'text="Place Order"')
+
             order_summary_continue_clicked = False
             for i, os_continue_selector in enumerate(order_summary_continue_selectors):
                 try:
@@ -976,21 +1028,29 @@ class CheckoutHandler:
                 # Button with text
                 'button:has-text("Confirm order")',
                 # Generic confirm selector
-                'button:has-text("Confirm")'
+                'button:has-text("Confirm")',
+                # Mobile bottom sheet buttons
+                'div[role="button"]:has-text("Confirm")',
+                'div[role="button"]:has-text("YES")',
+                'div[role="button"]:has-text("OK")'
             ]
             
+            # Additional logic to find ANY button in a recently appeared modal
             order_confirmed = False
+            
+            # Strategy: First try specific selectors
             for i, confirm_selector in enumerate(confirm_order_selectors):
                 try:
                     await job_queue.log_job(job_id, LogLevel.INFO, f"Attempting Order Confirmation with strategy #{i+1}")
                     
                     # Wait for the confirmation popup and click
-                    confirm_element = page.locator(confirm_selector)
+                    confirm_element = page.locator(confirm_selector).last
                     if await confirm_element.count() > 0:
-                        await confirm_element.click(timeout=5000)
+                        await confirm_element.first.scroll_into_view_if_needed()
+                        await confirm_element.first.click(timeout=5000)
                         await job_queue.log_job(job_id, LogLevel.INFO, f"Successfully clicked 'Confirm order' using strategy #{i+1}")
                         order_confirmed = True
-                        await asyncio.sleep(3)  # Wait for order confirmation to process
+                        await asyncio.sleep(4)  # Wait for order confirmation to process
                         break
                     else:
                         await job_queue.log_job(job_id, LogLevel.INFO, f"Confirm order element not found with strategy #{i+1}")
@@ -998,6 +1058,19 @@ class CheckoutHandler:
                 except Exception as e:
                     await job_queue.log_job(job_id, LogLevel.WARNING, f"Confirm order strategy #{i+1} failed: {str(e)}")
                     continue
+            
+            # Strategy: Role-based fallback
+            if not order_confirmed:
+                try:
+                    await job_queue.log_job(job_id, LogLevel.INFO, "Attempting Role-based Order Confirmation (get_by_role)...")
+                    confirm_btn = page.get_by_role("button", name=re.compile(r"Confirm|YES|OK|Place", re.I)).last
+                    if await confirm_btn.count() > 0:
+                        await confirm_btn.click(timeout=5000)
+                        await job_queue.log_job(job_id, LogLevel.INFO, "Successfully clicked 'Confirm order' using Role-based locator")
+                        order_confirmed = True
+                        await asyncio.sleep(4)
+                except Exception as e:
+                    await job_queue.log_job(job_id, LogLevel.WARNING, f"Role-based Confirmation failed: {str(e)}")
             
             if order_confirmed:
                 # Handle potential redirect and 410 Gone errors

@@ -150,7 +150,8 @@ class BatchManager:
         gstin: Optional[str] = None,
         business_name: Optional[str] = None,
         steal_deal_product: Optional[str] = None,
-        headless: Optional[bool] = False
+        headless: Optional[bool] = False,
+        automation_mode: str = 'GROCERY'
     ) -> Dict[str, Any]:
         """Create a batch automation with proper sequencing"""
         
@@ -162,6 +163,17 @@ class BatchManager:
                     "success": False,
                     "error": "BATCH AUTOMATION CANCELLED: Failed to load address configuration. Cannot proceed without proper address settings."
                 }
+
+        # FINAL SAFETY: Ensure automation_type is an action and automation_mode is a marketplace
+        # This prevents database check constraint violations if they were accidentally swapped
+        marketplaces = ['FLIPKART', 'GROCERY']
+        if automation_type in marketplaces:
+            if automation_mode not in marketplaces:
+                automation_mode = automation_type
+            automation_type = 'full_automation'
+        
+        if automation_mode not in marketplaces:
+            automation_mode = 'GROCERY'
 
         await self.load_names()
         
@@ -282,6 +294,7 @@ class BatchManager:
                             "batch_id": batch_id,
                             "batch_session_id": batch_session_id,
                             "automation_type": automation_type,
+                            "automation_mode": automation_mode,
                             "view_mode": view_mode,
                             "keep_browser_open": keep_browser_open,
                             "headless": bool(headless)
@@ -390,6 +403,7 @@ class BatchManager:
                 config_data = {
                     "batch_session_id": batch_session_id,
                     "automation_type": automation_type,
+                    "automation_mode": automation_mode,
                     "view_mode": view_mode,
                     "batch_size": batch_size,
                     "account_selection_mode": account_selection_mode,
@@ -405,11 +419,11 @@ class BatchManager:
                 # Record automation session in database
                 await conn.execute('''
                     INSERT INTO automation_sessions (
-                        batch_session_id, automation_type, started_by, status,
+                        batch_session_id, automation_type, automation_mode, started_by, status,
                         batch_size, total_accounts, total_batches, account_range_start,
                         account_range_end, total_jobs, config
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                ''', batch_session_id, automation_type, created_by, 'pending',
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                ''', batch_session_id, automation_type, automation_mode, created_by, 'pending',
                     batch_size, total_accounts, len(batches), 
                     account_range_start if account_selection_mode == 'range' else None,
                     account_range_end if account_selection_mode == 'range' else None, 

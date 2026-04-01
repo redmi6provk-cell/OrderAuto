@@ -36,7 +36,7 @@ class JobQueue:
         self.workers: Dict[str, Callable] = {}
         self.running = False
         self.worker_tasks: List[asyncio.Task] = []
-        self.max_workers = 3
+        self.max_workers = 10  # Increased from 3 to support larger batches
         self.poll_interval = 2  # seconds
         
     def register_worker(self, job_type: str, worker_func: Callable):

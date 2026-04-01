@@ -1,9 +1,17 @@
+import sys
+import asyncio
+import os
+
+# Fix for Playwright on Windows: use ProactorEventLoop
+# This MUST be the first thing that happens
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 import uvicorn
-import os
 from dotenv import load_dotenv
 
 # Load environment variables FIRST before importing routers
@@ -13,7 +21,6 @@ load_dotenv()
 from routers import auth, users, products, orders, automation, settings, addresses
 from services import job_queue
 from services.batch_manager import batch_manager
-from services.automation_worker import automation_worker
 from database import db
 
 # Security
@@ -23,12 +30,16 @@ security = HTTPBearer()
 async def lifespan(app: FastAPI):
     # Startup
     print("🚀 Starting Flipkart Automation API...")
+    
+    # Diagnostic: Check event loop type
+    loop = asyncio.get_running_loop()
+    print(f"🔄 Current Event Loop: {type(loop).__name__}")
+    if sys.platform == 'win32' and 'Selector' in type(loop).__name__:
+        print("⚠️ WARNING: SelectorEventLoop detected on Windows! Playwright will fail.")
+        print("🔧 Attempting to force ProactorEventLoop...")
 
     print("📊 Connecting to database pool...")
     await db.connect()
-
-    print("🚀 Initializing browser for automation...")
-    await automation_worker.initialize_browser()
 
     print("🔧 Starting job queue workers...")
     await job_queue.start()
@@ -42,9 +53,6 @@ async def lifespan(app: FastAPI):
     await batch_manager.stop_batch_coordinator()
     print("🛑 Shutting down job queue...")
     await job_queue.stop()
-
-    print("🛑 Shutting down browser...")
-    await automation_worker.cleanup_browser()
     
     print("📊 Disconnecting database pool...")
     await db.disconnect()
@@ -116,5 +124,6 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True
+        reload=True,
+        loop="asyncio"
     ) 

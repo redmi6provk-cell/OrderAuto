@@ -31,7 +31,7 @@ export function AutomationStats({
     return (
         <div className="space-y-6">
             {/* Header Section */}
-            <div className="bg-white rounded-xl border border-secondary-200 p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="bg-white rounded-xl border border-secondary-300 p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div className="flex items-center">
                     <div className="flex items-center justify-center w-12 h-12 bg-primary-100 rounded-xl mr-4 shadow-sm">
                         <Play className="h-6 w-6 text-primary-600" />
@@ -49,7 +49,7 @@ export function AutomationStats({
 
             {/* Stats Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <Card className="border-none shadow-premium hover:shadow-premium-md transition-all duration-300">
+                <Card className="border border-secondary-300 shadow-premium hover:shadow-premium-md transition-all duration-300">
                     <CardContent className="p-6 flex items-center space-x-4">
                         <div className="flex items-center justify-center w-12 h-12 bg-primary-50 rounded-xl text-primary-600">
                             <Users className="h-6 w-6" />
@@ -65,7 +65,7 @@ export function AutomationStats({
                     </CardContent>
                 </Card>
 
-                <Card className="border-none shadow-premium hover:shadow-premium-md transition-all duration-300">
+                <Card className="border border-secondary-300 shadow-premium hover:shadow-premium-md transition-all duration-300">
                     <CardContent className="p-6 flex items-center space-x-4">
                         <div className="flex items-center justify-center w-12 h-12 bg-success-50 rounded-xl text-success-600">
                             <Package className="h-6 w-6" />
@@ -81,7 +81,7 @@ export function AutomationStats({
                     </CardContent>
                 </Card>
 
-                <Card className="border-none shadow-premium hover:shadow-premium-md transition-all duration-300">
+                <Card className="border border-secondary-300 shadow-premium hover:shadow-premium-md transition-all duration-300">
                     <CardContent className="p-6 flex items-center space-x-4">
                         <div className="flex items-center justify-center w-12 h-12 bg-purple-50 rounded-xl text-purple-600">
                             <Settings className="h-6 w-6" />
@@ -119,7 +119,7 @@ export function AutomationStats({
 
             {/* Warning for Setup */}
             {(stats.active_accounts === 0 || stats.active_products === 0) && (
-                <div className="p-4 bg-warning-50 border border-warning-200 rounded-xl flex items-start gap-3 animate-fade-in">
+                <div className="p-4 bg-warning-50 border border-warning-300 rounded-xl flex items-start gap-3 animate-fade-in">
                     <AlertTriangle className="h-5 w-5 text-warning-600 mt-0.5 flex-shrink-0" />
                     <div>
                         <h4 className="text-sm font-semibold text-warning-800">Setup Required</h4>

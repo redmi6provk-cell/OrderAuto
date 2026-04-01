@@ -1,0 +1,37 @@
+﻿                                             Table "public.automation_sessions"
+       Column        |            Type             | Collation | Nullable |                     Default                     
+---------------------+-----------------------------+-----------+----------+-------------------------------------------------
+ id                  | integer                     |           | not null | nextval('automation_sessions_id_seq'::regclass)
+ batch_session_id    | character varying(100)      |           | not null | 
+ automation_type     | character varying(50)       |           | not null | 
+ started_by          | integer                     |           |          | 
+ status              | character varying(50)       |           |          | 'running'::character varying
+ batch_size          | integer                     |           | not null | 
+ total_accounts      | integer                     |           | not null | 
+ total_batches       | integer                     |           | not null | 
+ completed_batches   | integer                     |           |          | 0
+ account_range_start | integer                     |           |          | 
+ account_range_end   | integer                     |           |          | 
+ total_jobs          | integer                     |           |          | 0
+ completed_jobs      | integer                     |           |          | 0
+ failed_jobs         | integer                     |           |          | 0
+ started_at          | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+ ended_at            | timestamp without time zone |           |          | 
+ config              | jsonb                       |           |          | 
+ error_message       | text                        |           |          | 
+ automation_mode     | character varying(50)       |           |          | 'GROCERY'::character varying
+Indexes:
+    "automation_sessions_pkey" PRIMARY KEY, btree (id)
+    "automation_sessions_batch_session_id_key" UNIQUE CONSTRAINT, btree (batch_session_id)
+    "idx_automation_sessions_automation_type" btree (automation_type)
+    "idx_automation_sessions_batch_session_id" btree (batch_session_id)
+    "idx_automation_sessions_started_at" btree (started_at)
+    "idx_automation_sessions_started_by" btree (started_by)
+    "idx_automation_sessions_status" btree (status)
+Check constraints:
+    "automation_sessions_automation_type_check" CHECK (automation_type::text = ANY (ARRAY['login_test'::character varying, 'full_automation'::character varying, 'add_address'::character varying, 'add_coupon'::character varying, 'remove_addresses'::character varying, 'clear_cart'::character varying]::text[]))
+    "automation_sessions_status_check" CHECK (status::text = ANY (ARRAY['pending'::character varying, 'running'::character varying, 'completed'::character varying, 'failed'::character varying]::text[]))
+Foreign-key constraints:
+    "automation_sessions_started_by_fkey" FOREIGN KEY (started_by) REFERENCES users(id)
+
+

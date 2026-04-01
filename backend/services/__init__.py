@@ -4,7 +4,13 @@ Contains job queue and automation worker services
 """
 
 from .job_queue import job_queue, add_job, get_job_status, get_job_logs, register_worker, LogLevel
-from .automation_worker import automation_worker
+
+# Import automation_worker for registration side-effects
+try:
+    from . import automation_worker
+except ImportError:
+    import logging
+    logging.error("Failed to import automation_worker for registration")
 
 __all__ = [
     'job_queue',
@@ -12,6 +18,5 @@ __all__ = [
     'get_job_status', 
     'get_job_logs',
     'register_worker',
-    'LogLevel',
-    'automation_worker'
+    'LogLevel'
 ]

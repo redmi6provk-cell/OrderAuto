@@ -37,7 +37,7 @@ async def get_orders(
         f"""
         SELECT id, product_id, flipkart_user_id, product_name, order_id, 
                actual_price, quantity, status, payment_method, delivery_address,
-               order_date, expected_delivery, tracking_id, notes
+               order_date, expected_delivery, tracking_id, notes, automation_type
         FROM flipkart_orders
         {where_clause}
         ORDER BY order_date DESC
@@ -83,14 +83,14 @@ async def create_order(
     order = await conn.fetchrow(
         """
         INSERT INTO flipkart_orders 
-        (product_id, flipkart_user_id, product_name, actual_price, quantity, delivery_address)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        (product_id, flipkart_user_id, product_name, actual_price, quantity, delivery_address, automation_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id, product_id, flipkart_user_id, product_name, order_id, 
                   actual_price, quantity, status, payment_method, delivery_address,
-                  order_date, expected_delivery, tracking_id, notes
+                  order_date, expected_delivery, tracking_id, notes, automation_type
         """,
         order_data.product_id, order_data.flipkart_user_id, order_data.product_name,
-        order_data.actual_price, order_data.quantity, order_data.delivery_address
+        order_data.actual_price, order_data.quantity, order_data.delivery_address, order_data.automation_type
     )
     
     return OrderResponse(**dict(order))
@@ -106,7 +106,7 @@ async def get_order(
         """
         SELECT id, product_id, flipkart_user_id, product_name, order_id, 
                actual_price, quantity, status, payment_method, delivery_address,
-               order_date, expected_delivery, tracking_id, notes
+               order_date, expected_delivery, tracking_id, notes, automation_type
         FROM flipkart_orders WHERE id = $1
         """,
         order_id
@@ -184,7 +184,7 @@ async def update_order(
         WHERE id = ${param_count}
         RETURNING id, product_id, flipkart_user_id, product_name, order_id, 
                   actual_price, quantity, status, payment_method, delivery_address,
-                  order_date, expected_delivery, tracking_id, notes
+                  order_date, expected_delivery, tracking_id, notes, automation_type
     """
     
     order = await conn.fetchrow(query, *values)

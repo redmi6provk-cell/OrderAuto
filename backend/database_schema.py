@@ -106,6 +106,7 @@ async def create_database_schema():
                 expected_delivery DATE,
                 tracking_id VARCHAR(100),
                 notes TEXT,
+                automation_mode VARCHAR(50) DEFAULT 'GROCERY',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -117,6 +118,7 @@ async def create_database_schema():
                 id SERIAL PRIMARY KEY,
                 batch_session_id VARCHAR(100) UNIQUE NOT NULL,
                 automation_type VARCHAR(50) NOT NULL CHECK (automation_type IN ('login_test', 'full_automation', 'add_address', 'add_coupon', 'remove_addresses', 'clear_cart')),
+                automation_mode VARCHAR(50) DEFAULT 'GROCERY',
                 started_by INTEGER REFERENCES users(id),
                 status VARCHAR(50) DEFAULT 'running' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
                 batch_size INTEGER NOT NULL,
@@ -209,6 +211,7 @@ async def create_database_schema():
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_status ON automation_sessions(status);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_batch_session_id ON automation_sessions(batch_session_id);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_automation_type ON automation_sessions(automation_type);')
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_automation_mode ON automation_sessions(automation_mode);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_started_by ON automation_sessions(started_by);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_started_at ON automation_sessions(started_at);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status);')
@@ -360,6 +363,7 @@ async def update_automation_sessions_table():
                 id SERIAL PRIMARY KEY,
                 batch_session_id VARCHAR(100) UNIQUE NOT NULL,
                 automation_type VARCHAR(50) NOT NULL CHECK (automation_type IN ('login_test', 'full_automation', 'add_address', 'add_coupon', 'remove_addresses', 'clear_cart')),
+                automation_mode VARCHAR(50) DEFAULT 'GROCERY',
                 started_by INTEGER REFERENCES users(id),
                 status VARCHAR(50) DEFAULT 'running' CHECK (status IN ('pending', 'running', 'completed', 'failed')),
                 batch_size INTEGER NOT NULL,
@@ -382,6 +386,7 @@ async def update_automation_sessions_table():
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_status ON automation_sessions(status);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_batch_session_id ON automation_sessions(batch_session_id);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_automation_type ON automation_sessions(automation_type);')
+        await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_automation_mode ON automation_sessions(automation_mode);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_started_by ON automation_sessions(started_by);')
         await conn.execute('CREATE INDEX IF NOT EXISTS idx_automation_sessions_started_at ON automation_sessions(started_at);')
         

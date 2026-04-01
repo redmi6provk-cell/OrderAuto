@@ -109,11 +109,11 @@ export default function DashboardLayout({
   return (
     <div className="h-screen flex overflow-hidden bg-secondary-50">
       {/* Sidebar */}
-      <div className={`fixed inset-y-0 left-0 z-50 w-72 bg-white shadow-premium-lg transform ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        } transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0 border-r border-secondary-200`}>
+      <div className={`fixed inset-y-0 left-0 z-50 w-72 bg-white transform ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        } transition-transform duration-300 ease-in-out lg:translate-x-0 lg:static lg:inset-0 border-r border-secondary-300 shadow-sm`}>
 
         {/* Sidebar Header */}
-        <div className="flex items-center justify-between h-16 px-6 border-b border-secondary-100 bg-white">
+        <div className="flex items-center justify-between h-16 px-6 border-b border-secondary-200 bg-white">
           <div className="flex items-center space-x-3">
             <div className="bg-primary-600 p-1.5 rounded-lg shadow-lg shadow-primary-600/20">
               <ShoppingCart className="h-5 w-5 text-white" />
@@ -139,7 +139,7 @@ export default function DashboardLayout({
         </nav>
 
         {/* User Profile */}
-        <div className="p-4 border-t border-secondary-100 bg-secondary-50/50">
+        <div className="p-4 border-t border-secondary-200 bg-secondary-50/50">
           <div className="flex items-center justify-between">
             <div className="flex items-center min-w-0">
               <div className="flex-shrink-0">
@@ -173,9 +173,22 @@ export default function DashboardLayout({
       )}
 
       {/* Main content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden bg-secondary-50/50">
+        {/* Desktop Header */}
+        <header className="hidden lg:flex items-center justify-between h-16 px-8 bg-white border-b border-secondary-300">
+          <div className="flex items-center space-x-4">
+             <h2 className="text-sm font-semibold text-secondary-500 uppercase tracking-wider">
+               {pathname.split('/').pop()?.replace('_', ' ')}
+             </h2>
+          </div>
+          <div className="flex items-center space-x-4">
+            <div className="h-8 w-px bg-secondary-200 mx-2" />
+            <span className="text-sm font-medium text-secondary-600">{user.username}</span>
+          </div>
+        </header>
+
         {/* Mobile Header */}
-        <div className="lg:hidden flex items-center justify-between h-16 px-4 bg-white border-b border-secondary-200 shadow-sm">
+        <div className="lg:hidden flex items-center justify-between h-16 px-4 bg-white border-b border-secondary-300 shadow-sm">
           <button
             className="text-secondary-500 hover:text-secondary-700 p-2 -ml-2"
             onClick={() => setSidebarOpen(true)}
@@ -186,7 +199,7 @@ export default function DashboardLayout({
           <div className="w-6"></div> {/* Spacer for centering */}
         </div>
 
-        <main className="flex-1 relative z-0 overflow-y-auto focus:outline-none bg-secondary-50/50">
+        <main className="flex-1 relative z-0 overflow-y-auto focus:outline-none">
           <div className="py-8">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 md:px-8">
               {children}

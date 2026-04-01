@@ -98,6 +98,7 @@ export default function AutomationPage() {
   const [businessName, setBusinessName] = useState('');
   const [stealDealProduct, setStealDealProduct] = useState('');
   const [headless, setHeadless] = useState(true);
+  const [automationTypeMode, setAutomationTypeMode] = useState<'GROCERY' | 'FLIPKART'>('GROCERY');
 
   // Data
   const [products, setProducts] = useState<Product[]>([]);
@@ -359,7 +360,8 @@ useEffect(() => {
         max_cart_value: maxCartValue || null,
         address_id: selectedAddressId,
         account_selection_mode: accountSelectionMode,
-        headless: headless
+        headless: headless,
+        automation_mode: automationTypeMode
       };
 
       if (accountSelectionMode === 'range') {
@@ -418,6 +420,7 @@ useEffect(() => {
         account_selection_mode: accountSelectionMode,
         keep_browser_open: true,
         headless: headless,
+        automation_mode: automationTypeMode
       };
 
       if (accountSelectionMode === 'range') {
@@ -692,6 +695,7 @@ useEffect(() => {
         accountRangeEnd={accountRangeEnd} setAccountRangeEnd={setAccountRangeEnd}
         customAccountEmails={customAccountEmails} setCustomAccountEmails={setCustomAccountEmails}
         automationType={automationType} setAutomationType={setAutomationType}
+        automationTypeMode={automationTypeMode} setAutomationTypeMode={setAutomationTypeMode}
         selectedAddressId={selectedAddressId} setSelectedAddressId={setSelectedAddressId}
         addresses={addresses}
         maxCartValue={maxCartValue} setMaxCartValue={setMaxCartValue}

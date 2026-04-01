@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -26,6 +27,7 @@ class BrowserManager:
         self.screenshot_type: str = 'jpeg'          # jpeg allows quality control
         self.screenshot_quality: int = 60           # 0-100 (lower = smaller file)
         self.screenshot_full_page: bool = False     # capture viewport only by default
+        self.keep_browser_on_failure: bool = True  # DEBUG: Keep open on failure
         
     async def initialize_browser(self):
         """Initialize Playwright browser"""
@@ -47,7 +49,14 @@ class BrowserManager:
                 self.browser = None
 
             if self.playwright is None:
+                from playwright.async_api import async_playwright
                 self.playwright = await async_playwright().start()
+
+            # --- Staggered Parallel Launch Delay ---
+            # Wait 5 seconds + 1-3 seconds random jitter to avoid CPU spikes on Windows
+            delay = 5 + random.uniform(1, 3)
+            logging.info(f"Staggering browser launch for 5s + random delay: {delay:.2f}s")
+            await asyncio.sleep(delay)
 
             # Conservative launch args to avoid easy bot flags; avoid overly aggressive flags
             launch_args = [
@@ -178,6 +187,10 @@ class BrowserManager:
         """Clean up browser context for a specific job"""
         try:
             if job_id in self.active_contexts:
+                if self.keep_browser_on_failure:
+                    logging.info(f"DEBUG: Skipping cleanup for job {job_id} to keep browser open.")
+                    return
+
                 context_info = self.active_contexts[job_id]
                 context = context_info['context']
                 user_data_dir = context_info['user_data_dir']

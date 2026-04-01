@@ -65,8 +65,7 @@ class AutomationWorker(CoreWorker):
             return False
 
 
-# Create a global instance for the worker functions
-automation_worker = AutomationWorker()
+# Global instances are removed to ensure process isolation for parallel jobs
 
 
 @register_worker("flipkart_login")
@@ -77,31 +76,36 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
     2. Add products to cart (if provided)
     3. Complete checkout process (if requested)
     """
+    # Each job gets its own isolated worker and browser process
+    worker = AutomationWorker()
+    
     try:
         email = job_data.get("email")
         products = job_data.get("products", [])
         view_mode = job_data.get("view_mode", "desktop")
         enable_checkout = job_data.get("enable_checkout", True)
+        automation_type = job_data.get("automation_type", "full_automation")
+        automation_mode = job_data.get("automation_mode", "GROCERY")
         # Apply headless preference for this job
         try:
             headless_pref = bool(job_data.get("headless"))
         except Exception:
             headless_pref = False
-        automation_worker.browser_manager.set_headless(headless_pref)
-        await automation_worker.initialize_browser()
+        worker.browser_manager.set_headless(headless_pref)
+        await worker.initialize_browser()
 
         if not email:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "no_email_provided")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "no_email_provided")
             return {"success": False, "error": "Email not provided in job data"}
 
         await job_queue.log_job(job_id, LogLevel.INFO, f"Starting full automation for {email}")
 
         # Phase 1: Login to Flipkart
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1: Logging in to Flipkart")
-        login_success = await automation_worker.login_to_flipkart(email, job_id, view_mode)
+        login_success = await worker.login_to_flipkart(email, job_id, view_mode)
 
         if not login_success:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "login_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "login_failed")
             return {"success": False, "error": "Phase 1 failed: Login was unsuccessful"}
         
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1 completed successfully")
@@ -113,29 +117,29 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
 
         # Phase 1.2: Remove all addresses from account
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1.2: Removing all existing addresses")
-        remove_success = await automation_worker.remove_all_addresses(job_id)
+        remove_success = await worker.remove_all_addresses(job_id)
         if not remove_success:
             await job_queue.log_job(job_id, LogLevel.ERROR, "❌ AUTOMATION CANCELLED: Failed to remove addresses")
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "remove_addresses_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "remove_addresses_failed")
             return {"success": False, "error": "Failed to remove addresses"}
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1.2 completed successfully")
 
         # Phase 1.3: Add one fresh randomized address
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1.3: Adding fresh randomized address")
         address_id = job_data.get('address_id')
-        add_success = await automation_worker.add_address_mobile(job_id, address_id)
+        add_success = await worker.add_address_mobile(job_id, address_id)
         if not add_success:
             await job_queue.log_job(job_id, LogLevel.ERROR, "❌ AUTOMATION CANCELLED: Failed to add address")
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "add_address_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "add_address_failed")
             return {"success": False, "error": "Failed to add address"}
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1.3 completed successfully")
 
         # Phase 1.4: Ensure cart is empty before proceeding
-        await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1.4: Ensuring cart is empty before proceeding")
-        preclear_result = await automation_worker.cart_manager.clear_cart_if_needed(job_id)
+        await job_queue.log_job(job_id, LogLevel.INFO, f"Phase 1.4: Ensuring {automation_mode} cart is empty before proceeding")
+        preclear_result = await worker.cart_manager.clear_cart_if_needed(job_id, automation_mode)
         if not preclear_result.get("success"):
             await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Failed to clear cart: {preclear_result.get('error')}")
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_failed")
             return {"success": False, "error": "Failed to clear cart"}
         else:
             if preclear_result.get("performed"):
@@ -145,9 +149,9 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1.4 completed successfully")
 
         # Phase 2: Add products to cart and configure quantities
-        await job_queue.log_job(job_id, LogLevel.INFO, f"Phase 2: Adding {len(products)} products to cart")
+        await job_queue.log_job(job_id, LogLevel.INFO, f"Phase 2: Adding {len(products)} products to {automation_mode} cart")
         max_cart_value = job_data.get('max_cart_value')
-        products_result = await automation_worker.add_and_configure_products_in_cart(products, job_id, max_cart_value)
+        products_result = await worker.add_and_configure_products_in_cart(products, job_id, max_cart_value, automation_mode)
 
         if not products_result["success"]:
             # Log the specific cancellation reason for account failure tracking
@@ -164,7 +168,7 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
             await job_queue.log_job(job_id, LogLevel.INFO, f"   Message: {error_msg}")
             await job_queue.log_job(job_id, LogLevel.INFO, f"   Products meet quantity: False")
             await job_queue.log_job(job_id, LogLevel.INFO, f"   Products total: {len(products)}")
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, f"phase2_failed_{cancel_reason}")
+            await worker.browser_manager.capture_failure_screenshot(job_id, f"phase2_failed_{cancel_reason}")
 
             return {"success": False, "error": f"Phase 2 failed: {error_msg}", "cancel_reason": cancel_reason}
         
@@ -179,7 +183,7 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
             business_name = job_data.get("business_name")
             # Optional steal deal product name
             steal_deal_product = job_data.get("steal_deal_product")
-            checkout_result = await automation_worker.complete_checkout_process(job_id, max_cart_value, address_id, gstin, business_name, steal_deal_product)
+            checkout_result = await worker.complete_checkout_process(job_id, max_cart_value, address_id, gstin, business_name, steal_deal_product, automation_mode)
 
             if checkout_result.get("success"):
                 await job_queue.log_job(job_id, LogLevel.INFO, "Phase 3 completed successfully - Order placed!")
@@ -225,7 +229,7 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
                 await job_queue.log_job(job_id, LogLevel.INFO, f"   Status: FAIL")
                 failure_msg = checkout_result.get('message', 'Checkout process unsuccessful')
                 await job_queue.log_job(job_id, LogLevel.INFO, f"   Message: {failure_msg}")
-                await automation_worker.browser_manager.capture_failure_screenshot(job_id, "checkout_failed")
+                await worker.browser_manager.capture_failure_screenshot(job_id, "checkout_failed")
                 return {"success": False, "error": f"FAILED: {failure_msg}"}
         else:
             await job_queue.log_job(job_id, LogLevel.INFO, "Checkout disabled - automation completed with products in cart")
@@ -235,7 +239,7 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
         error_message = f"An unexpected error occurred in automation: {str(e)}"
         await job_queue.log_job(job_id, LogLevel.ERROR, error_message)
         logging.error(error_message)
-        await automation_worker.browser_manager.capture_failure_screenshot(job_id, "unexpected_exception")
+        await worker.browser_manager.capture_failure_screenshot(job_id, "unexpected_exception")
         return {"success": False, "error": error_message}
     finally:
         # Conditionally keep the browser open for login tests if requested
@@ -247,8 +251,8 @@ async def run_full_automation(job_data: Dict[str, Any], job_id: int) -> Dict[str
         if keep_open:
             await job_queue.log_job(job_id, LogLevel.INFO, "Keeping browser open for manual closure (login test). Close the browser window to end the session.")
         else:
-            # This is crucial: ensures the browser context is always closed for this job.
-            await automation_worker.cleanup_job_context(job_id)
+            # Fully cleanup the browser process for this job to allow other parallel jobs to remain isolated
+            await worker.cleanup_browser()
 
 
 @register_worker("add_coupon")
@@ -266,36 +270,39 @@ async def run_add_coupon_automation(job_data: Dict[str, Any], job_id: int) -> Di
         coupon_code = (job_data.get("coupon_code") or "").strip()
         view_mode = job_data.get("view_mode", "mobile")
 
+        # Each job gets its own isolated worker and browser process
+        worker = AutomationWorker()
+        
         # Apply headless preference for this job
         try:
             headless_pref = bool(job_data.get("headless"))
         except Exception:
             headless_pref = False
-        automation_worker.browser_manager.set_headless(headless_pref)
-        await automation_worker.initialize_browser()
+        worker.browser_manager.set_headless(headless_pref)
+        await worker.initialize_browser()
 
         if not email:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_no_email")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_no_email")
             return {"success": False, "error": "Email not provided in job data"}
         if not coupon_code:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_no_code")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_no_code")
             return {"success": False, "error": "Coupon code not provided"}
 
         await job_queue.log_job(job_id, LogLevel.INFO, f"Starting 'Add Coupon' automation for {email}")
 
         # Phase 1: Login
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1: Logging in to Flipkart")
-        login_success = await automation_worker.login_to_flipkart(email, job_id, view_mode)
+        login_success = await worker.login_to_flipkart(email, job_id, view_mode)
         if not login_success:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_login_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_login_failed")
             return {"success": False, "error": "Phase 1 failed: Login was unsuccessful"}
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1 (Login) completed successfully.")
 
         # Use existing context
-        context = await automation_worker.get_job_context(job_id)
+        context = await worker.get_job_context(job_id)
         if not context:
             await job_queue.log_job(job_id, LogLevel.ERROR, "Cannot proceed: No browser context after login.")
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_no_context")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_no_context")
             return {"success": False, "error": "No browser context"}
 
         page = context.pages[0] if context.pages else await context.new_page()
@@ -329,7 +336,7 @@ async def run_add_coupon_automation(job_data: Dict[str, Any], job_id: int) -> Di
                 await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed selector for Add Coupon trigger ({sel}): {e}")
 
         if not open_clicked:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_popup_not_opened")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_popup_not_opened")
             return {"success": False, "error": "Could not open Add Coupon popup"}
 
         # Wait for popup content
@@ -358,7 +365,7 @@ async def run_add_coupon_automation(job_data: Dict[str, Any], job_id: int) -> Di
                 continue
 
         if not coupon_input:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_input_not_found")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_input_not_found")
             return {"success": False, "error": "Coupon input field not found"}
 
         await coupon_input.click()
@@ -420,7 +427,7 @@ async def run_add_coupon_automation(job_data: Dict[str, Any], job_id: int) -> Di
                 await job_queue.log_job(job_id, LogLevel.DEBUG, f"Enter key fallback failed: {e}")
 
         if not add_btn_clicked:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_button_not_clicked")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_button_not_clicked")
             return {"success": False, "error": "Could not click Add Coupon button"}
 
         # Wait briefly for result; attempt to detect success or error
@@ -478,7 +485,7 @@ async def run_add_coupon_automation(job_data: Dict[str, Any], job_id: int) -> Di
 
         if detected_error:
             await job_queue.log_job(job_id, LogLevel.WARNING, f"Coupon submission failed: {detected_error}")
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_submission_error")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_submission_error")
             return {"success": False, "error": detected_error, "coupon_code": coupon_code}
         elif detected_success:
             await job_queue.log_job(job_id, LogLevel.INFO, f"Coupon submission succeeded: {detected_success}")
@@ -491,11 +498,11 @@ async def run_add_coupon_automation(job_data: Dict[str, Any], job_id: int) -> Di
         error_message = f"An unexpected error occurred in the 'Add Coupon' automation job: {str(e)}"
         await job_queue.log_job(job_id, LogLevel.ERROR, error_message)
         logging.error(error_message)
-        await automation_worker.browser_manager.capture_failure_screenshot(job_id, "coupon_exception")
+        await worker.browser_manager.capture_failure_screenshot(job_id, "coupon_exception")
         return {"success": False, "error": error_message}
     finally:
-        # Always cleanup context for this job
-        await automation_worker.cleanup_job_context(job_id)
+        # Fully cleanup the browser process for this job
+        await worker.cleanup_browser()
 
 
 @register_worker("clear_cart")
@@ -508,215 +515,61 @@ async def run_clear_cart_automation(job_data: Dict[str, Any], job_id: int) -> Di
         email = job_data.get("email")
         view_mode = job_data.get("view_mode", "mobile")
 
+        automation_mode = job_data.get("automation_mode", "GROCERY")
+        
+        # Each job gets its own isolated worker and browser process
+        worker = AutomationWorker()
+        
         try:
             headless_pref = bool(job_data.get("headless"))
         except Exception:
             headless_pref = False
-        automation_worker.browser_manager.set_headless(headless_pref)
-        await automation_worker.initialize_browser()
+        worker.browser_manager.set_headless(headless_pref)
+        await worker.initialize_browser()
 
         if not email:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_no_email")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_no_email")
             return {"success": False, "error": "Email not provided"}
 
-        await job_queue.log_job(job_id, LogLevel.INFO, f"Starting Clear Cart automation for {email}")
+        await job_queue.log_job(job_id, LogLevel.INFO, f"Starting Clear Cart automation ({automation_mode}) for {email}")
 
         # Login
         await job_queue.log_job(job_id, LogLevel.INFO, "Logging in...")
-        login_success = await automation_worker.login_to_flipkart(email, job_id, view_mode)
+        login_success = await worker.login_to_flipkart(email, job_id, view_mode)
         if not login_success:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_login_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_login_failed")
             return {"success": False, "error": "Login failed"}
 
-        context = await automation_worker.get_job_context(job_id)
-        if not context:
-            return {"success": False, "error": "No browser context"}
-
-        page = context.pages[0] if context.pages else await context.new_page()
-
-        # Open cart
-        await job_queue.log_job(job_id, LogLevel.INFO, "Opening Grocery cart...")
-        await page.goto('https://www.flipkart.com/viewcart?marketplace=GROCERY', wait_until='domcontentloaded')
-        await asyncio.sleep(1.2)
-
-        # Check if empty
-        async def is_empty():
-            try:
-                # Check for "Your basket is empty!" text anywhere on page
-                if await page.get_by_text("Your basket is empty").count() > 0:
-                    return True
-                # Check header - if it says just "Grocery basket" with no count
-                header = await page.locator('#guidSearch > div > h1').inner_text()
-                if "Grocery basket" in header and "item" not in header:
-                    return True
-            except Exception:
-                pass
-            return False
-
-        if await is_empty():
-            await job_queue.log_job(job_id, LogLevel.INFO, "Cart already empty")
-            return {"success": True, "message": "Cart already empty", "removed": 0, "decremented": 0, "account": email}
-
-        removed = 0
-        decremented = 0
-        max_attempts = 15
-
-        for attempt in range(max_attempts):
-            made_progress = False
-            
-            # Always scroll to top before each attempt to ensure we see the actual cart items
-            try:
-                await page.evaluate('window.scrollTo(0, 0)')
-                await asyncio.sleep(0.2)
-            except Exception:
-                pass
-            
-            await job_queue.log_job(job_id, LogLevel.INFO, f"Attempt {attempt + 1}/{max_attempts}...")
-
-            # Strategy 1: Click all "Remove" buttons (for out of stock items)
-            try:
-                # Quick search for Remove buttons - fail fast if none exist
-                remove_buttons = []
-                
-                # Primary method: Exact text match "Remove"
-                try:
-                    btns = page.get_by_text("Remove", exact=True)
-                    count = await btns.count()
-                    if count > 0:
-                        for i in range(count):
-                            remove_buttons.append(btns.nth(i))
-                except Exception:
-                    pass
-                
-                # If no exact matches, try role-based search
-                if len(remove_buttons) == 0:
-                    try:
-                        btns = page.get_by_role("button", name=re.compile(r"^Remove$", re.I))
-                        count = await btns.count()
-                        if count > 0:
-                            for i in range(count):
-                                remove_buttons.append(btns.nth(i))
-                    except Exception:
-                        pass
-
-                if len(remove_buttons) > 0:
-                    await job_queue.log_job(job_id, LogLevel.INFO, f"Found {len(remove_buttons)} Remove button(s)")
-                    
-                    for btn in remove_buttons:
-                        try:
-                            # Quick visibility check with short timeout
-                            if await btn.is_visible(timeout=500):
-                                # Don't scroll - items should be visible at top already
-                                await btn.click(timeout=1500)
-                                removed += 1
-                                made_progress = True
-                                await job_queue.log_job(job_id, LogLevel.INFO, f"✓ Clicked Remove button #{removed}")
-                                await asyncio.sleep(0.3)
-                        except Exception:
-                            # Skip this button and continue
-                            continue
-                else:
-                    await job_queue.log_job(job_id, LogLevel.DEBUG, "No Remove buttons found")
-            except Exception as e:
-                await job_queue.log_job(job_id, LogLevel.DEBUG, f"Remove button search error: {e}")
-
-            # Short wait for UI to settle only if we clicked something
-            if removed > 0:
-                await asyncio.sleep(0.3)
-
-            # Check if empty after removing
-            if await is_empty():
-                await job_queue.log_job(job_id, LogLevel.INFO, "✅ Cart is now empty!")
-                return {"success": True, "message": "Cart cleared", "removed": removed, "decremented": decremented, "account": email}
-
-            # Strategy 2: Click minus buttons to decrement quantities
-            try:
-                # Find the quantity control containers, then get the first child (minus button)
-                # The container pattern is: div with classes r-1awozwy.r-qwd59z.r-18u37iz.r-mabqd8.r-1777fci.r-7bouqp
-                # Minus is always the first child, Plus is the third child
-                
-                # Method 1: Find by container structure and first child, but only within the cart area
-                minus_buttons = []
-                try:
-                    # Scope to the actual cart container to avoid promo sections
-                    cart_area = page.locator('#_parentCtr_')
-                    containers = cart_area.locator('div.css-175oi2r.r-1awozwy.r-qwd59z.r-18u37iz.r-mabqd8.r-1777fci.r-7bouqp')
-                    container_count = await containers.count()
-                    for i in range(container_count):
-                        try:
-                            # Get the first child which is the minus button
-                            minus = containers.nth(i).locator('> div:nth-child(1)')
-                            if await minus.count() > 0:
-                                minus_buttons.append(minus.first)
-                        except Exception:
-                            continue
-                except Exception:
-                    pass
-                
-                # Method 2: Fallback - find minus icon image specifically, but only in cart area
-                if len(minus_buttons) == 0:
-                    try:
-                        # Scope to cart area
-                        cart_area = page.locator('#_parentCtr_')
-                        # Minus icon has this specific URL pattern
-                        minus_imgs = cart_area.locator('img[src*="beb19156-518d-4110-bceb"]')
-                        img_count = await minus_imgs.count()
-                        for i in range(img_count):
-                            try:
-                                # Get the clickable parent of the image
-                                img = minus_imgs.nth(i)
-                                parent = img.locator('xpath=..')
-                                if await parent.count() > 0:
-                                    minus_buttons.append(parent.first)
-                            except Exception:
-                                continue
-                    except Exception:
-                        pass
-                
-                await job_queue.log_job(job_id, LogLevel.INFO, f"Found {len(minus_buttons)} minus button(s)")
-                
-                for btn in minus_buttons:
-                    try:
-                        # Quick visibility check
-                        if await btn.is_visible(timeout=500):
-                            # Don't scroll - items should be visible at top already
-                            await btn.click(timeout=1500)
-                            decremented += 1
-                            made_progress = True
-                            await job_queue.log_job(job_id, LogLevel.INFO, f"✓ Clicked minus button #{decremented}")
-                            await asyncio.sleep(0.12)
-                    except Exception:
-                        # Skip and continue
-                        continue
-            except Exception as e:
-                await job_queue.log_job(job_id, LogLevel.DEBUG, f"Minus button search error: {e}")
-
-            # Check if empty after decrementing
-            if await is_empty():
-                await job_queue.log_job(job_id, LogLevel.INFO, "✅ Cart is now empty!")
-                return {"success": True, "message": "Cart cleared", "removed": removed, "decremented": decremented, "account": email}
-
-            # If no progress made, exit to avoid infinite loop
-            if not made_progress:
-                await job_queue.log_job(job_id, LogLevel.WARNING, f"No progress in attempt {attempt + 1}")
-                # Still nothing? Break after a few tries
-                if attempt > 2:  # Give at least 3 tries
-                    break
-
-        # Final check
-        if await is_empty():
-            return {"success": True, "message": "Cart cleared", "removed": removed, "decremented": decremented, "account": email}
+        # Use the centralized CartManager to clear the cart
+        # This handles both GROCERY and FLIPKART marketplaces and tab switching
+        await job_queue.log_job(job_id, LogLevel.INFO, f"Opening and clearing {automation_mode} cart...")
+        clear_result = await worker.cart_manager.clear_cart_if_needed(job_id, automation_mode)
+        
+        if clear_result.get("success"):
+            return {
+                "success": True, 
+                "message": f"Successfully cleared {automation_mode} cart",
+                "removed": clear_result.get("removed", 0),
+                "decremented": clear_result.get("decremented", 0),
+                "account": email
+            }
         else:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_not_empty")
-            return {"success": False, "error": "Could not fully clear cart", "removed": removed, "decremented": decremented}
+            await worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_failed")
+            return {
+                "success": False, 
+                "error": f"Failed to clear {automation_mode} cart: {clear_result.get('error')}",
+                "removed": clear_result.get("removed", 0),
+                "decremented": clear_result.get("decremented", 0)
+            }
 
     except Exception as e:
         await job_queue.log_job(job_id, LogLevel.ERROR, f"Clear cart error: {str(e)}")
         logging.error(f"Clear cart error: {str(e)}")
-        await automation_worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_exception")
+        await worker.browser_manager.capture_failure_screenshot(job_id, "clear_cart_exception")
         return {"success": False, "error": str(e)}
     finally:
-        await automation_worker.cleanup_job_context(job_id)
+        # Fully cleanup the browser process for this job
+        await worker.cleanup_browser()
 
 
 @register_worker("add_address")
@@ -729,36 +582,39 @@ async def run_add_address_automation(job_data: Dict[str, Any], job_id: int) -> D
         address_data = job_data.get("address_data", {})
         view_mode = job_data.get("view_mode", "desktop")
 
+        # Each job gets its own isolated worker and browser process
+        worker = AutomationWorker()
+        
         # Apply headless preference for this job
         try:
             headless_pref = bool(job_data.get("headless"))
         except Exception:
             headless_pref = False
-        automation_worker.browser_manager.set_headless(headless_pref)
-        await automation_worker.initialize_browser()
+        worker.browser_manager.set_headless(headless_pref)
+        await worker.initialize_browser()
 
         if not email:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "address_no_email")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "address_no_email")
             return {"success": False, "error": "Email not provided in job data"}
         if not address_data:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "address_no_data")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "address_no_data")
             return {"success": False, "error": "Address data not provided for the job"}
 
         # Validate required fields for the address
         required_fields = ["name", "phone", "pincode", "locality", "address"]
         missing_fields = [field for field in required_fields if not address_data.get(field)]
         if missing_fields:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "address_missing_fields")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "address_missing_fields")
             return {"success": False, "error": f"Missing required address fields: {', '.join(missing_fields)}"}
 
         await job_queue.log_job(job_id, LogLevel.INFO, f"Starting 'Add Address' automation for {email}")
 
         # Phase 1: Login to Flipkart
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1: Logging in to Flipkart")
-        login_success = await automation_worker.login_to_flipkart(email, job_id, view_mode)
+        login_success = await worker.login_to_flipkart(email, job_id, view_mode)
 
         if not login_success:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "address_login_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "address_login_failed")
             return {"success": False, "error": "Phase 1 failed: Login was unsuccessful"}
         
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1 (Login) completed successfully.")
@@ -770,12 +626,12 @@ async def run_add_address_automation(job_data: Dict[str, Any], job_id: int) -> D
         if view_mode == "mobile":
             # Get address_id from job_data for database lookup
             address_id = job_data.get('address_id')
-            address_success = await automation_worker.add_address_mobile(job_id, address_id)
+            address_success = await worker.add_address_mobile(job_id, address_id)
         else:
-            address_success = await automation_worker.add_new_address(address_data, job_id)
+            address_success = await worker.add_new_address(address_data, job_id)
 
         if not address_success:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "address_add_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "address_add_failed")
             return {"success": False, "error": "Phase 2 failed: Could not add the new address"}
         
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 2 (Add Address) completed successfully.")
@@ -786,11 +642,11 @@ async def run_add_address_automation(job_data: Dict[str, Any], job_id: int) -> D
         error_message = f"An unexpected error occurred in the 'Add Address' automation job: {str(e)}"
         await job_queue.log_job(job_id, LogLevel.ERROR, error_message)
         logging.error(error_message)
-        await automation_worker.browser_manager.capture_failure_screenshot(job_id, "address_exception")
+        await worker.browser_manager.capture_failure_screenshot(job_id, "address_exception")
         return {"success": False, "error": error_message}
     finally:
-        # This is crucial: ensures the browser context is always closed for this job.
-        await automation_worker.cleanup_job_context(job_id)
+        # Fully cleanup the browser process for this job
+        await worker.cleanup_browser()
 
 
 @register_worker("remove_addresses")
@@ -807,33 +663,36 @@ async def run_remove_addresses_automation(job_data: Dict[str, Any], job_id: int)
         email = job_data.get("email")
         view_mode = job_data.get("view_mode", "mobile")
 
+        # Each job gets its own isolated worker and browser process
+        worker = AutomationWorker()
+        
         # Apply headless preference for this job
         try:
             headless_pref = bool(job_data.get("headless"))
         except Exception:
             headless_pref = False
-        automation_worker.browser_manager.set_headless(headless_pref)
-        await automation_worker.initialize_browser()
+        worker.browser_manager.set_headless(headless_pref)
+        await worker.initialize_browser()
 
         if not email:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "remove_addr_no_email")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "remove_addr_no_email")
             return {"success": False, "error": "Email not provided in job data"}
 
         await job_queue.log_job(job_id, LogLevel.INFO, f"Starting 'Remove Addresses' automation for {email}")
 
         # Phase 1: Login
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1: Logging in to Flipkart")
-        login_success = await automation_worker.login_to_flipkart(email, job_id, view_mode)
+        login_success = await worker.login_to_flipkart(email, job_id, view_mode)
         if not login_success:
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "remove_addr_login_failed")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "remove_addr_login_failed")
             return {"success": False, "error": "Phase 1 failed: Login was unsuccessful"}
         await job_queue.log_job(job_id, LogLevel.INFO, "Phase 1 (Login) completed successfully.")
 
         # Use existing context
-        context = await automation_worker.get_job_context(job_id)
+        context = await worker.get_job_context(job_id)
         if not context:
             await job_queue.log_job(job_id, LogLevel.ERROR, "Cannot proceed: No browser context after login.")
-            await automation_worker.browser_manager.capture_failure_screenshot(job_id, "remove_addr_no_context")
+            await worker.browser_manager.capture_failure_screenshot(job_id, "remove_addr_no_context")
             return {"success": False, "error": "No browser context"}
 
         page = context.pages[0] if context.pages else await context.new_page()
@@ -987,8 +846,8 @@ async def run_remove_addresses_automation(job_data: Dict[str, Any], job_id: int)
         error_message = f"An unexpected error occurred in the 'Remove Addresses' automation job: {str(e)}"
         await job_queue.log_job(job_id, LogLevel.ERROR, error_message)
         logging.error(error_message)
-        await automation_worker.browser_manager.capture_failure_screenshot(job_id, "remove_addresses_exception")
+        await worker.browser_manager.capture_failure_screenshot(job_id, "remove_addresses_exception")
         return {"success": False, "error": error_message}
     finally:
-        # Always cleanup context for this job
-        await automation_worker.cleanup_job_context(job_id)
+        # Fully cleanup the browser process for this job
+        await worker.cleanup_browser()

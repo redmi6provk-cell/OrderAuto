@@ -20,6 +20,8 @@ interface AutomationConfigProps {
     setCustomAccountEmails: (val: string) => void;
     automationType: string;
     setAutomationType: (val: string) => void;
+    automationTypeMode: 'GROCERY' | 'FLIPKART';
+    setAutomationTypeMode: (val: 'GROCERY' | 'FLIPKART') => void;
     selectedAddressId: number | null;
     setSelectedAddressId: (val: number | null) => void;
     addresses: any[];
@@ -51,6 +53,7 @@ export function AutomationConfig({
     accountRangeEnd, setAccountRangeEnd,
     customAccountEmails, setCustomAccountEmails,
     automationType, setAutomationType,
+    automationTypeMode, setAutomationTypeMode,
     selectedAddressId, setSelectedAddressId,
     addresses,
     maxCartValue, setMaxCartValue,
@@ -79,7 +82,7 @@ export function AutomationConfig({
     const isDesktopRequired = desktopRequiredTypes.includes(automationType);
 
     return (
-        <Card className="border-none shadow-premium">
+        <Card className="border border-secondary-300 shadow-premium overflow-hidden">
             <CardHeader className="border-b border-secondary-100 bg-secondary-50/30">
                 <CardTitle className="flex items-center text-xl text-secondary-900">
                     <Settings className="mr-2 h-5 w-5 text-primary-600" />
@@ -90,9 +93,9 @@ export function AutomationConfig({
             <CardContent className="space-y-8 p-6">
 
                 {/* Step 1: Basic Settings */}
-                <div>
-                    <h3 className="text-sm font-semibold text-secondary-900 uppercase tracking-wider mb-4 flex items-center">
-                        <span className="bg-secondary-100 text-secondary-600 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">1</span>
+                <div className="p-5 bg-secondary-50/30 rounded-xl border border-secondary-100 shadow-sm space-y-4">
+                    <h3 className="text-sm font-semibold text-secondary-900 uppercase tracking-wider flex items-center">
+                        <span className="bg-primary-100 text-primary-700 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2 border border-primary-200">1</span>
                         Basic Settings
                     </h3>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -141,12 +144,10 @@ export function AutomationConfig({
                     </div>
                 </div>
 
-                <div className="h-px bg-secondary-100" />
-
                 {/* Step 2: Account Selection */}
-                <div>
-                    <h3 className="text-sm font-semibold text-secondary-900 uppercase tracking-wider mb-4 flex items-center">
-                        <span className="bg-secondary-100 text-secondary-600 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">2</span>
+                <div className="p-5 bg-secondary-50/30 rounded-xl border border-secondary-100 shadow-sm space-y-4">
+                    <h3 className="text-sm font-semibold text-secondary-900 uppercase tracking-wider flex items-center">
+                        <span className="bg-primary-100 text-primary-700 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2 border border-primary-200">2</span>
                         Target Accounts
                     </h3>
 
@@ -191,12 +192,10 @@ export function AutomationConfig({
                     )}
                 </div>
 
-                <div className="h-px bg-secondary-100" />
-
                 {/* Step 3: Action Settings */}
-                <div>
-                    <h3 className="text-sm font-semibold text-secondary-900 uppercase tracking-wider mb-4 flex items-center">
-                        <span className="bg-secondary-100 text-secondary-600 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2">3</span>
+                <div className="p-5 bg-secondary-50/30 rounded-xl border border-secondary-100 shadow-sm space-y-4">
+                    <h3 className="text-sm font-semibold text-secondary-900 uppercase tracking-wider flex items-center">
+                        <span className="bg-primary-100 text-primary-700 w-6 h-6 rounded-full flex items-center justify-center text-xs mr-2 border border-primary-200">3</span>
                         Action Settings
                     </h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -231,9 +230,20 @@ export function AutomationConfig({
                                 ))}
                             </select>
                         </div>
-                    </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
+                        <div className="space-y-2">
+                            <Label>Marketplace Mode</Label>
+                            <select
+                                value={automationTypeMode}
+                                onChange={(e) => setAutomationTypeMode(e.target.value as 'GROCERY' | 'FLIPKART')}
+                                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                <option value="GROCERY">Flipkart Grocery</option>
+                                <option value="FLIPKART">Flipkart Regular</option>
+                            </select>
+                            <p className="text-xs text-secondary-500">Target marketplace</p>
+                        </div>
+
                         <div className="space-y-2">
                             <Label>Max Cart Value (₹)</Label>
                             <Input
@@ -270,49 +280,29 @@ export function AutomationConfig({
                                         value="mobile"
                                         checked={viewMode === 'mobile'}
                                         onChange={() => setViewMode('mobile')}
-                                        
                                         className="w-4 h-4 text-primary-600 border-gray-300 focus:ring-primary-500"
                                     />
                                     <span className="text-sm font-medium text-secondary-700 group-hover:text-primary-600">
                                         Mobile
                                     </span>
                                 </label>
-
-                                
                             </div>
                         </div>
-                    </div>
 
-                    {/* Dynamic Fields */}
-                    {automationType === 'add_coupon' && (
-                        <div className="mt-6 p-4 bg-secondary-50 rounded-lg border border-secondary-200 animate-fade-in">
-                            {accountSelectionMode === 'custom' ? (
-                                <div className="space-y-2">
-                                    <Label>Coupon Codes (1 per email)</Label>
-                                    <Textarea
-                                        value={couponCodesText}
-                                        onChange={(e) => setCouponCodesText(e.target.value)}
-                                        placeholder="Enter one code per email (comma or newline separated)"
-                                        className="h-28 font-mono text-sm"
-                                    />
-                                </div>
-                            ) : (
-                                <div className="space-y-2">
-                                    <Label>Coupon Code</Label>
-                                    <Input
-                                        type="text"
-                                        value={couponCode}
-                                        onChange={(e) => setCouponCode(e.target.value)}
-                                        placeholder="Enter single coupon code"
-                                    />
-                                </div>
-                            )}
-                        </div>
-                    )}
+                        {automationType === 'full_automation' && (
+                            <div className="space-y-2">
+                                <Label>Steal Deal Product (Optional)</Label>
+                                <Input
+                                    type="text"
+                                    value={stealDealProduct}
+                                    onChange={(e) => setStealDealProduct(e.target.value)}
+                                    placeholder="e.g., Tide Double Power"
+                                />
+                            </div>
+                        )}
 
-                    {automationType === 'full_automation' && (
-                        <div className="mt-6 p-4 bg-secondary-50 rounded-lg border border-secondary-200 animate-fade-in space-y-4">
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {automationType === 'full_automation' && (
+                            <>
                                 <div className="space-y-2">
                                     <Label>GSTIN (Optional)</Label>
                                     <Input
@@ -332,24 +322,39 @@ export function AutomationConfig({
                                         placeholder="Registered business name"
                                     />
                                 </div>
+                            </>
+                        )}
+
+                        {automationType === 'add_coupon' && (
+                            <div className="col-span-1 md:col-span-2 space-y-2 bg-secondary-50 p-4 rounded-lg border border-secondary-200">
+                                {accountSelectionMode === 'custom' ? (
+                                    <div className="space-y-2">
+                                        <Label>Coupon Codes (1 per email)</Label>
+                                        <Textarea
+                                            value={couponCodesText}
+                                            onChange={(e) => setCouponCodesText(e.target.value)}
+                                            placeholder="Enter one code per email (comma or newline separated)"
+                                            className="h-28 font-mono text-sm"
+                                        />
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        <Label>Coupon Code</Label>
+                                        <Input
+                                            type="text"
+                                            value={couponCode}
+                                            onChange={(e) => setCouponCode(e.target.value)}
+                                            placeholder="Enter single coupon code"
+                                        />
+                                    </div>
+                                )}
                             </div>
-                            <div className="space-y-2">
-                                <Label>Steal Deal Product (Optional)</Label>
-                                <Input
-                                    type="text"
-                                    value={stealDealProduct}
-                                    onChange={(e) => setStealDealProduct(e.target.value)}
-                                    placeholder="e.g., Tide Double Power"
-                                />
-                            </div>
-                        </div>
-                    )}
+                        )}
+                    </div>
                 </div>
 
-                <div className="h-px bg-secondary-100" />
-
                 {/* Step 4: Summary & Buttons */}
-                <div>
+                <div className="p-5 bg-primary-50/30 rounded-xl border border-primary-100 shadow-sm space-y-6">
                     <div className="bg-primary-50/50 border border-primary-100 rounded-xl p-5 mb-6">
                         <h4 className="font-semibold text-primary-900 mb-3 text-sm uppercase tracking-wide">Summary</h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-y-2 gap-x-8 text-sm">
@@ -368,6 +373,10 @@ export function AutomationConfig({
                             <div className="flex justify-between">
                                 <span className="text-secondary-500">Total Accounts:</span>
                                 <span className="font-medium text-secondary-900">{totalAccounts}</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-secondary-500">Marketplace:</span>
+                                <span className="font-medium text-secondary-900">{automationTypeMode === 'GROCERY' ? 'Grocery' : 'Regular'}</span>
                             </div>
                         </div>
                     </div>

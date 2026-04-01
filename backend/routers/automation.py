@@ -59,7 +59,7 @@ async def get_automation_sessions(
     
     # Base query
     base_query = f"""
-        SELECT id, batch_session_id, automation_type, status, batch_size, 
+        SELECT id, batch_session_id, automation_type, automation_mode, status, batch_size, 
                total_accounts, total_batches, completed_batches, 
                account_range_start, account_range_end, total_jobs, 
                completed_jobs, failed_jobs, started_at, ended_at, 
@@ -91,6 +91,9 @@ async def get_automation_sessions(
         # Ensure max_cart_value field exists (for backward compatibility)
         if 'max_cart_value' not in session_dict:
             session_dict['max_cart_value'] = None
+        # Ensure automation_mode field exists (for backward compatibility)
+        if 'automation_mode' not in session_dict or session_dict['automation_mode'] is None:
+            session_dict['automation_mode'] = 'GROCERY'
         result.append(AutomationSessionResponse(**session_dict))
     return result
 
@@ -133,12 +136,12 @@ async def create_automation_session(
     # Create session
     session = await conn.fetchrow(
         """
-        INSERT INTO automation_sessions (session_name, started_by, config)
-        VALUES ($1, $2, $3)
+        INSERT INTO automation_sessions (session_name, started_by, config, automation_type)
+        VALUES ($1, $2, $3, $4)
         RETURNING id, session_name, status, products_monitored, accounts_used,
-                  orders_placed, errors_count, started_at, ended_at, config
+                  orders_placed, errors_count, started_at, ended_at, config, automation_type
         """,
-        session_data.session_name, current_user["id"], session_data.config
+        session_data.session_name, current_user["id"], session_data.config, session_data.automation_type
     )
     
     # Start automation in background
@@ -155,7 +158,7 @@ async def get_automation_session(
     """Get specific automation session"""
     session = await conn.fetchrow(
         """
-        SELECT id, batch_session_id, automation_type, status, batch_size, 
+        SELECT id, batch_session_id, automation_type, automation_mode, status, batch_size, 
                total_accounts, total_batches, completed_batches, 
                account_range_start, account_range_end, total_jobs, 
                completed_jobs, failed_jobs, started_at, ended_at, 
@@ -182,6 +185,10 @@ async def get_automation_session(
     # Ensure max_cart_value field exists (for backward compatibility)
     if 'max_cart_value' not in session_dict:
         session_dict['max_cart_value'] = None
+    
+    # Ensure automation_mode field exists (for backward compatibility)
+    if 'automation_mode' not in session_dict or session_dict['automation_mode'] is None:
+        session_dict['automation_mode'] = 'GROCERY'
     
     return AutomationSessionResponse(**session_dict)
 
@@ -417,6 +424,11 @@ async def start_bulk_automation(
     current_user: dict = Depends(get_current_user)
 ):
     """Start bulk automation with proper batch synchronization"""
+    # Log the incoming request details for debugging
+    print(f"\n📦 NEW AUTOMATION REQUEST FROM FRONTEND:")
+    print(json.dumps(request, indent=2))
+    print("-" * 40)
+
     batch_size = request.get('batch_size', 3)
     automation_type = request.get('automation_type', 'login_test')
     view_mode = request.get('view_mode', 'desktop')
@@ -435,6 +447,21 @@ async def start_bulk_automation(
     steal_deal_product = request.get('steal_deal_product')
     # Optional headless mode
     headless = bool(request.get('headless', False))
+    # Marketplace mode (FLIPKART or GROCERY)
+    automation_mode = request.get('automation_mode', 'GROCERY')
+    
+    # Sanitization: Ensure automation_type is an action and automation_mode is a marketplace
+    marketplaces = ['FLIPKART', 'GROCERY']
+    if automation_type in marketplaces:
+        # Move marketplace from type to mode if it was accidentally swapped
+        if automation_mode not in marketplaces:
+            automation_mode = automation_type
+        # Default to full_automation if the type was accidentally a marketplace
+        automation_type = 'full_automation'
+    
+    # Ensure mode is valid even if not swapped
+    if automation_mode not in marketplaces:
+        automation_mode = 'GROCERY'
     
     # Handle account selection based on mode
     if account_selection_mode == 'range':
@@ -501,7 +528,8 @@ async def start_bulk_automation(
         gstin=gstin,
         business_name=business_name,
         steal_deal_product=steal_deal_product,
-        headless=headless
+        headless=headless,
+        automation_mode=automation_mode
     )
     
     if not result["success"]:

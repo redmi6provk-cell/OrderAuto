@@ -108,6 +108,8 @@ class OrderCreate(BaseModel):
     actual_price: Decimal
     quantity: int
     delivery_address: Optional[str] = None
+    automation_type: str = "full_automation"
+    automation_mode: str = "GROCERY"
 
 class OrderUpdate(BaseModel):
     status: Optional[str] = None
@@ -131,12 +133,16 @@ class OrderResponse(BaseModel):
     expected_delivery: Optional[date]
     tracking_id: Optional[str]
     notes: Optional[str]
+    automation_type: Optional[str] = "full_automation"
+    automation_mode: Optional[str] = "GROCERY"
 
 # Automation Models
 class AutomationSessionCreate(BaseModel):
     session_name: str
     config: Optional[Dict[str, Any]] = None
     max_cart_value: Optional[Decimal] = None
+    automation_type: str = "login_test"
+    automation_mode: str = "GROCERY"
 
 class AutomationSessionUpdate(BaseModel):
     status: Optional[str] = None
@@ -151,6 +157,7 @@ class AutomationSessionResponse(BaseModel):
     id: int
     batch_session_id: str
     automation_type: str
+    automation_mode: str
     status: str
     batch_size: int
     total_accounts: int

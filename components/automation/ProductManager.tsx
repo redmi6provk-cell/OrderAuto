@@ -41,7 +41,7 @@ export function ProductManager({
     handleDeleteProduct
 }: ProductManagerProps) {
     return (
-        <Card className="border-none shadow-premium">
+        <Card className="border border-secondary-300 shadow-premium overflow-hidden">
             <CardHeader className="border-b border-secondary-100 bg-secondary-50/30">
                 <div className="flex items-center justify-between">
                     <div>

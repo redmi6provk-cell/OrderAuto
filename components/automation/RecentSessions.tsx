@@ -102,7 +102,7 @@ export function RecentSessions({
     };
 
     return (
-        <Card className="border-none shadow-premium">
+        <Card className="border border-secondary-300 shadow-premium overflow-hidden">
             <CardHeader className="border-b border-secondary-100 bg-secondary-50/30 pb-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <CardTitle className="text-xl text-secondary-900 flex items-center gap-2">

@@ -14,7 +14,189 @@ class CartManager:
     def __init__(self, browser_manager):
         self.browser_manager = browser_manager
 
+    async def select_marketplace_tab(self, page: Any, job_id: int, automation_mode: str = "FLIPKART") -> bool:
+        """Select the correct tab in the cart (Flipkart vs Grocery)."""
+        try:
+            # 1. SETUP REDIRECT BLOCKING (Prevention)
+            # We block the known promotional redirect URL patterns to stop the loop at its source
+            try:
+                await page.route(re.compile(r".*/fpg/cbc/store-page.*|.*/fpg/cc/dashboard.*"), lambda route: route.abort())
+                await job_queue.log_job(job_id, LogLevel.DEBUG, "🚫 Blocking promotional redirect URLs for this session.")
+            except Exception:
+                pass
+
+            # First, ensure we haven't been redirected to an ad page
+            await self._ensure_on_cart_page(page, job_id, automation_mode)
+
+            await job_queue.log_job(job_id, LogLevel.INFO, f"Switching to {automation_mode} tab in cart...")
+            
+            # Wait for tab container
+            tab_container_selector = '.css-g5y9jx[style*="width: 800px"]'
+            try:
+                await page.wait_for_selector(tab_container_selector, timeout=5000)
+            except Exception:
+                # If tab container is not found, we might have been redirected again or there's only one marketplace
+                if await self._ensure_on_cart_page(page, job_id, automation_mode):
+                    # If we had to fix the URL, wait again for tabs
+                    try:
+                        await page.wait_for_selector(tab_container_selector, timeout=3000)
+                    except Exception:
+                        pass
+                else:
+                    await job_queue.log_job(job_id, LogLevel.DEBUG, "Tab container not found - might only have one marketplace active.")
+                    return True
+
+            if automation_mode == "FLIPKART":
+                # First tab is usually Flipkart
+                tab_selectors = ['div:has-text("Flipkart (")', 'div:has-text("Flipkart")', 'text="Flipkart"']
+            else:
+                # Second tab is usually Grocery
+                tab_selectors = ['div:has-text("Grocery (")', 'div:has-text("Grocery")', 'text="Grocery"']
+
+            tab_found = False
+            for selector in tab_selectors:
+                tab = page.locator(selector)
+                if await tab.count() > 0:
+                    # CHECK IF ALREADY SELECTED
+                    # We check if the parent div has a border or style indicating activity to avoid redundant clicks
+                    is_active = False
+                    try:
+                        # Common Flipkart active tab style involves a specific border color or class
+                        # We use a broad heuristic: if it has an underline div, it's likely active
+                        indicator = tab.locator('xpath=./following-sibling::div[contains(@style, "background-color")]')
+                        if await indicator.count() > 0:
+                            is_active = True
+                    except Exception:
+                        pass
+
+                    if is_active:
+                        await job_queue.log_job(job_id, LogLevel.INFO, f"✨ {automation_mode} tab is already active, skipping click.")
+                    else:
+                        await tab.first.click()
+                        await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Selected {automation_mode} tab using '{selector}'")
+                    
+                    tab_found = True
+                    break
+            
+            if tab_found:
+                await asyncio.sleep(2.0)
+                return True
+            else:
+                await job_queue.log_job(job_id, LogLevel.DEBUG, f"{automation_mode} tab not found - assuming it's already selected or not present.")
+                return True
+
+        except Exception as e:
+            await job_queue.log_job(job_id, LogLevel.WARNING, f"Failed to switch marketplace tab: {str(e)}")
+            return False
+
+    async def _ensure_on_cart_page(self, page: Any, job_id: int, automation_mode: str) -> bool:
+        """Monitor the URL for 5 seconds to detect and recover from any late-triggered redirects.
+        Only applied to Flipkart mode as requested by the user.
+        Returns True if a redirect was recovered, False otherwise."""
+        if automation_mode != "FLIPKART":
+            return False
+            
+        ad_patterns = [
+            "productType=CC",
+            "fpg/cbc/store-page",
+            "utm_source=Cart_OTA",
+            "checkout/offers",
+            "cc-store-page",
+            "fpg/cbc",
+            "fpg/cc/dashboard",
+            "flipkart.com/fpg/",
+            "payment/interstitial"
+        ]
+        
+        last_logged_url = None
+        
+        # Check every 0.3 seconds for up to 5 seconds for more responsiveness
+        for i in range(15):
+            current_url = page.url
+            
+            # Log only if URL changes to avoid spamming
+            if current_url != last_logged_url:
+                await job_queue.log_job(job_id, LogLevel.DEBUG, f"Current URL check: {current_url[:150]}")
+                last_logged_url = current_url
+
+            if any(pattern in current_url for pattern in ad_patterns):
+                await job_queue.log_job(job_id, LogLevel.WARNING, f"⚠️ Detected promotional redirect: {current_url[:100]}...")
+                
+                # ATTEMPT DISMISSAL FIRST (Fast Recovery)
+                # Instead of a full Home -> Cart cycle, try to find 'Cart' or 'Back' buttons on the promo page
+                try:
+                    dismiss_selectors = [
+                        'a[href*="/viewcart"]',
+                        'div:has-text("Back to Cart")',
+                        'div:has-text("No thanks")',
+                        'button:has-text("No thanks")',
+                        'span:has-text("✕")',
+                        '#container > div > div._2msBFL > div:nth-child(3) > div' # Cart icon path
+                    ]
+                    for selector in dismiss_selectors:
+                        btn = page.locator(selector)
+                        if await btn.count() > 0 and await btn.first.is_visible():
+                            await job_queue.log_job(job_id, LogLevel.INFO, f"🎯 Dismissing promo using: {selector}")
+                            await btn.first.click(timeout=3000)
+                            await asyncio.sleep(1.0)
+                            if "viewcart" in page.url:
+                                await job_queue.log_job(job_id, LogLevel.INFO, "✅ Sucessfully returned to cart via dismissal button.")
+                                return True
+                except Exception:
+                    pass
+
+                await job_queue.log_job(job_id, LogLevel.INFO, "🔄 Dismissal failed, forcing navigation back to the proper cart URL via Home page.")
+                await self._navigate_to_cart_safely(page, job_id, automation_mode)
+                return True
+            
+            # Additional check: if not on viewcart and not home, it might be a redirect we didn't pattern-match
+            if "viewcart" not in current_url and "flipkart.com/" in current_url and current_url.strip("https://").strip("www.").strip("/") != "flipkart.com":
+                 if not any(kw in current_url for kw in ["viewcart", "marketplace="]):
+                     # Small delay to see if it's just slow loading
+                     await asyncio.sleep(0.5)
+                     if "viewcart" not in page.url:
+                        await job_queue.log_job(job_id, LogLevel.WARNING, f"⚠️ Unexpected URL detected: {page.url[:100]}... Navigating back.")
+                        await self._navigate_to_cart_safely(page, job_id, automation_mode)
+                        return True
+            
+            await asyncio.sleep(0.3)
+        
+        return False
+
+    async def _navigate_to_cart_safely(self, page: Any, job_id: int, automation_mode: str):
+        """Navigate to Home page first, then to the Cart to bypass interstitial ads as requested by the user."""
+        try:
+            # 1. SETUP REDIRECT BLOCKING (Prevention)
+            try:
+                await page.route(re.compile(r".*/fpg/cbc/store-page.*|.*/fpg/cc/dashboard.*"), lambda route: route.abort())
+                await job_queue.log_job(job_id, LogLevel.DEBUG, "🚫 Arming redirect blocker for cart navigation.")
+            except Exception:
+                pass
+
+            await job_queue.log_job(job_id, LogLevel.INFO, "🏠 Resetting navigation via Home page...")
+            await page.goto('https://www.flipkart.com/', wait_until='domcontentloaded', timeout=45000)
+            await asyncio.sleep(1.0)
+            
+            cart_url = f'https://www.flipkart.com/viewcart?marketplace={automation_mode.upper()}'
+            await job_queue.log_job(job_id, LogLevel.INFO, f"🛒 Navigating to cart: {cart_url}")
+            await page.goto(cart_url, wait_until='domcontentloaded', timeout=45000)
+            
+            # Verify we landed on viewcart
+            try:
+                await asyncio.sleep(1.5)
+                if "viewcart" not in page.url:
+                    await job_queue.log_job(job_id, LogLevel.WARNING, "Not yet on cart page, retrying direct link...")
+                    await page.goto(cart_url, wait_until='networkidle', timeout=30000)
+            except Exception:
+                pass
+                
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            await job_queue.log_job(job_id, LogLevel.ERROR, f"Failed safe navigation: {str(e)}")
+
+
     async def _get_home_cart_count(self, job_id: int) -> int:
+
         context = await self.browser_manager.get_job_context(job_id)
         if not context:
             return 0
@@ -53,26 +235,67 @@ class CartManager:
                 continue
         return 0
 
-    async def clear_cart_if_needed(self, job_id: int) -> dict:
+    async def clear_cart_if_needed(self, job_id: int, automation_mode: str = "FLIPKART") -> dict:
         context = await self.browser_manager.get_job_context(job_id)
         if not context:
             return {"success": False, "performed": False, "error": "no_context"}
         page = context.pages[0] if context.pages else await context.new_page()
 
-        await job_queue.log_job(job_id, LogLevel.INFO, "Navigating to cart page to check and clear if needed...")
+        await job_queue.log_job(job_id, LogLevel.INFO, f"Navigating to {automation_mode} cart page to check and clear if needed...")
 
         try:
-            await page.goto('https://www.flipkart.com/viewcart?marketplace=GROCERY', wait_until='domcontentloaded')
-            await asyncio.sleep(1.0)
+            # 1. Determine which tab to look for
+            target_tab = "Grocery" if automation_mode == "GROCERY" else "Flipkart"
+            
+            # Go to home first then cart to avoid redirects (Safe Navigation) - Flipkart only
+            if automation_mode == "FLIPKART":
+                await self._navigate_to_cart_safely(page, job_id, automation_mode)
+            else:
+                await page.goto(f'https://www.flipkart.com/viewcart?marketplace={automation_mode}', wait_until='domcontentloaded')
+                await asyncio.sleep(2.0)
+            
+                pass
+
+            # Switch tab if needed
+            await self.select_marketplace_tab(page, job_id, automation_mode)
 
             async def is_empty() -> bool:
                 try:
-                    if await page.get_by_text("Your basket is empty").count() > 0:
-                        return True
-                    try:
-                        header = await page.locator('#guidSearch > div > h1').inner_text()
-                        if "Grocery basket" in header and "item" not in header:
+                    # SAFETY CHECK: If we are not on a cart URL, we cannot be 'empty'
+                    # Returning False will trigger the redirect handling in the main loop
+                    current_url = page.url
+                    if "viewcart" not in current_url:
+                        return False
+
+                    # Generic empty indicators
+                    empty_indicators = [
+                        "Your basket is empty",
+                        "Your cart is empty",
+                        "Missing items? Login to see the items you added previously",
+                        "Your grocery basket is empty",
+                        "Flipkart cart is empty"
+                    ]
+                    for text in empty_indicators:
+                        if await page.get_by_text(text).count() > 0:
                             return True
+                    
+                    # Image based indicator
+                    if await page.locator('img[src*="empty-cart"], img[src*="empty_cart"]').count() > 0:
+                        return True
+
+                    # Header-based indicators
+                    try:
+                        header_selectors = ['#guidSearch > div > h1', 'div:has-text("My Cart")', 'h1:has-text("My Cart")']
+                        for sel in header_selectors:
+                            try:
+                                header_loc = page.locator(sel)
+                                if await header_loc.count() > 0:
+                                    header = await header_loc.first.inner_text()
+                                    # If the header doesn't contain "item" or "items", it's likely empty (e.g., "My Cart", "Grocery basket")
+                                    if any(kw in header for kw in ["Grocery basket", "My Cart", "Flipkart cart"]) and "item" not in header.lower():
+                                        return True
+                            except Exception:
+                                continue
                     except Exception:
                         pass
                 except Exception:
@@ -86,9 +309,25 @@ class CartManager:
             await job_queue.log_job(job_id, LogLevel.INFO, "Cart has items - starting clearing process...")
             removed = 0
             decremented = 0
-            max_attempts = 20  # Increased attempts to handle more items
+            max_attempts = 25  # Handling even more items
 
             for attempt in range(max_attempts):
+                # 2. Check and fix promotional redirects (Flipkart only)
+                if automation_mode == "FLIPKART":
+                    # SAFETY CHECK: If we've been redirected, recover and CONTINUE the loop to refresh state
+                    if await self._ensure_on_cart_page(page, job_id, automation_mode):
+                        await job_queue.log_job(job_id, LogLevel.INFO, "🔄 Navigation recovered, refreshing state...")
+                        # Re-select tab if needed
+                        await self.select_marketplace_tab(page, job_id, automation_mode)
+                        continue 
+                    
+                    current_url = page.url
+                    if "/p/itm" in current_url or "/product-review/" in current_url:
+                        await job_queue.log_job(job_id, LogLevel.WARNING, f"⚠️ Redirected to product page {current_url[:60]}... Navigating back.")
+                        await self._navigate_to_cart_safely(page, job_id, automation_mode)
+                        await self.select_marketplace_tab(page, job_id, automation_mode)
+                        continue
+
                 # Check if cart is empty at start of each iteration
                 if await is_empty():
                     await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Cart is now empty! (removed={removed}, decremented={decremented})")
@@ -114,83 +353,130 @@ class CartManager:
                 except Exception:
                     pass
 
+                # Save debug HTML for inspection
+                # try:
+                #     debug_filename = f"cart_debug_{job_id}_{attempt}.html"
+                #     html_content = await page.content()
+                #     with open(debug_filename, "w", encoding="utf-8") as f:
+                #         f.write(html_content)
+                #     await job_queue.log_job(job_id, LogLevel.DEBUG, f"Saved debug HTML to {debug_filename}")
+                # except Exception:
+                #     pass
+
                 made_progress = False
 
-                # Try Remove buttons first
-                try:
-                    btns = page.get_by_text("Remove", exact=True)
-                    cnt = await btns.count()
-                    if cnt == 0:
-                        btns = page.get_by_role("button", name=re.compile(r"^Remove$", re.I))
-                        cnt = await btns.count()
-                    
-                    if cnt > 0:
-                        await job_queue.log_job(job_id, LogLevel.INFO, f"Found {cnt} Remove button(s)")
-                        for i in range(cnt):
-                            try:
-                                b = btns.nth(i)
-                                # Scroll button into view
-                                await b.scroll_into_view_if_needed()
-                                await asyncio.sleep(0.2)
-                                
-                                if await b.is_visible(timeout=1000):
-                                    await b.click(timeout=2000)
-                                    removed += 1
-                                    made_progress = True
-                                    await job_queue.log_job(job_id, LogLevel.INFO, f"Clicked Remove button {i+1}")
-                                    await asyncio.sleep(0.5)
-                            except Exception as e:
-                                await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed to click Remove {i+1}: {e}")
-                                continue
-                except Exception as e:
-                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Remove button search failed: {e}")
+                if automation_mode == "FLIPKART":
+                    # Strategy for Flipkart: Just click Remove button
+                    try:
+                        # Strategy 1: Case-insensitive "Remove" or "Delete"
+                        btns = page.get_by_text(re.compile(r"Remove|Delete", re.I), exact=False)
+                        
+                        # Strategy 2: Specific div-based patterns (Added the user's specific r- utility classes)
+                        if await btns.count() == 0:
+                            btns = page.locator('div.css-1pz39u2:has-text("Remove"), div.r-1pz39u2:has-text("Remove"), div.css-1rymq56:has-text("Remove"), div:has-text("Delete")')
+                        
+                        # Strategy 3: Role-based search
+                        if await btns.count() == 0:
+                            btns = page.get_by_role("button", name=re.compile(r"Remove|Delete", re.I))
+                                                
+                        # Strategy 4: Fallback to any clickable containing "Remove"
+                        if await btns.count() == 0:
+                            btns = page.locator('div[style*="cursor: pointer"]:has-text("Remove")')
 
-                # Try minus buttons to decrement quantities to 0
-                try:
-                    minus_buttons = []
-                    cart_area = page.locator('#_parentCtr_')
-                    containers = cart_area.locator('div.css-175oi2r.r-1awozwy.r-qwd59z.r-18u37iz.r-mabqd8.r-1777fci.r-7bouqp')
-                    c = await containers.count()
-                    
-                    for i in range(c):
-                        try:
-                            minus = containers.nth(i).locator('> div:nth-child(1)')
-                            if await minus.count() > 0:
-                                minus_buttons.append(minus.first)
-                        except Exception:
-                            continue
-                    
-                    if len(minus_buttons) == 0:
-                        imgs = cart_area.locator('img[src*="beb19156-518d-4110-bceb"]')
-                        ic = await imgs.count()
-                        for i in range(ic):
+                        cnt = await btns.count()
+                        if cnt > 0:
+                            await job_queue.log_job(job_id, LogLevel.INFO, f"Found {cnt} potential Remove button(s)")
+                            
+                            # Click the first one (we click specific container with cursor:pointer if possible)
+                            target = btns.first
+                            
+                            # TRY TO FIND THE INTERACTIVE PARENT (cursor: pointer)
                             try:
-                                parent = imgs.nth(i).locator('xpath=..')
-                                if await parent.count() > 0:
-                                    minus_buttons.append(parent.first)
+                                # We look for the ancestor div that has cursor: pointer style
+                                parent_clickable = target.locator('xpath=./ancestor-or-self::div[contains(@style, "cursor: pointer") or contains(@class, "cursor-pointer")]').last
+                                if await parent_clickable.count() > 0:
+                                    target = parent_clickable
+                                    await job_queue.log_job(job_id, LogLevel.DEBUG, "Targeting interactive parent container for Remove click")
+                            except Exception:
+                                pass
+
+                            await target.click(force=True, timeout=5000)
+                            made_progress = True
+                            removed += 1
+                            await job_queue.log_job(job_id, LogLevel.INFO, "Clicked Remove button...")
+                            
+                            # HANDLE CONFIRMATION MODAL (Flipkart Regular)
+                            await asyncio.sleep(1.0)
+                            confirm_btns = page.locator('div:has-text("Are you sure"), div:has-text("REMOVE ITEM")').locator('div:has-text("Remove")').last
+                            if await confirm_btns.count() > 0:
+                                await job_queue.log_job(job_id, LogLevel.INFO, "Handling confirmation popup...")
+                                await confirm_btns.click(force=True, timeout=3000)
+                                await asyncio.sleep(1.0)
+                            
+                            await page.wait_for_load_state('networkidle', timeout=5000)
+                            await asyncio.sleep(1.5)
+                        else:
+                            await job_queue.log_job(job_id, LogLevel.DEBUG, "No Remove buttons found in this iteration.")
+                    except Exception as e:
+                        await job_queue.log_job(job_id, LogLevel.DEBUG, f"Remove button search/click failed: {e}")
+
+                elif automation_mode == "GROCERY":
+                    # Strategy for Grocery: Use minus buttons to decrement quantities to 0
+                    try:
+                        minus_buttons = []
+                        cart_area = page.locator('#_parentCtr_')
+                        containers = cart_area.locator('div.css-175oi2r.r-1awozwy.r-qwd59z.r-18u37iz.r-mabqd8.r-1777fci.r-7bouqp')
+                        c = await containers.count()
+                        
+                        for i in range(c):
+                            try:
+                                minus = containers.nth(i).locator('> div:nth-child(1)')
+                                if await minus.count() > 0:
+                                    minus_buttons.append(minus.first)
                             except Exception:
                                 continue
-                    
-                    if len(minus_buttons) > 0:
-                        await job_queue.log_job(job_id, LogLevel.INFO, f"Found {len(minus_buttons)} minus button(s)")
                         
-                    for idx, btn in enumerate(minus_buttons):
-                        try:
-                            # Scroll button into view
-                            await btn.scroll_into_view_if_needed()
-                            await asyncio.sleep(0.2)
+                        if len(minus_buttons) == 0:
+                            # 1. Try specific minus icon image
+                            try:
+                                imgs = cart_area.locator('img[src*="beb19156-518d-4110-bceb"]')
+                                ic = await imgs.count()
+                                for i in range(ic):
+                                    parent = imgs.nth(i).locator('xpath=..')
+                                    if await parent.count() > 0:
+                                        minus_buttons.append(parent.first)
+                            except Exception:
+                                pass
+                                
+                            # 2. Try generic text or role based minus buttons
+                            try:
+                                generic_minus = page.locator('div:has-text("-"):visible, [role="button"]:has-text("-"):visible')
+                                gm_count = await generic_minus.count()
+                                for i in range(gm_count):
+                                    minus_buttons.append(generic_minus.nth(i))
+                            except Exception:
+                                pass
+                        
+                        if len(minus_buttons) > 0:
+                            await job_queue.log_job(job_id, LogLevel.INFO, f"Found {len(minus_buttons)} potential minus button(s)")
                             
-                            if await btn.is_visible(timeout=1000):
-                                await btn.click(timeout=2000)
-                                decremented += 1
-                                made_progress = True
-                                await job_queue.log_job(job_id, LogLevel.INFO, f"Clicked minus button {idx+1}")
-                                await asyncio.sleep(0.3)
-                        except Exception as e:
-                            await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed to click minus {idx+1}: {e}")
-                            continue
-                except Exception as e:
-                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Minus button search failed: {e}")
+                        for idx, btn in enumerate(minus_buttons):
+                            try:
+                                # Scroll button into view
+                                await btn.scroll_into_view_if_needed()
+                                await asyncio.sleep(0.2)
+                                
+                                if await btn.is_visible(timeout=1000):
+                                    await btn.click(timeout=2000)
+                                    decremented += 1
+                                    made_progress = True
+                                    await job_queue.log_job(job_id, LogLevel.INFO, f"Clicked minus button {idx+1}")
+                                    await asyncio.sleep(0.3)
+                            except Exception as e:
+                                await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed to click minus {idx+1}: {e}")
+                                continue
+                    except Exception as e:
+                        await job_queue.log_job(job_id, LogLevel.DEBUG, f"Minus button search failed: {e}")
 
                 # Wait for UI to update after removals
                 await asyncio.sleep(1.0)
@@ -233,7 +519,8 @@ class CartManager:
             await job_queue.log_job(job_id, LogLevel.INFO, f"🎁 Searching for Steal Deal product: '{product_name}'")
             
             # Navigate to cart where steal deals section is shown
-            await page.goto('https://www.flipkart.com/viewcart?marketplace=GROCERY', wait_until='domcontentloaded')
+            marketplace = "GROCERY"
+            await page.goto(f'https://www.flipkart.com/viewcart?marketplace={marketplace}', wait_until='domcontentloaded')
             await asyncio.sleep(2.0)
             
             # Scroll down to ensure steal deals section is loaded
@@ -868,7 +1155,7 @@ class CartManager:
         
         try:
             # Navigate to cart to check total
-            cart_url = "https://www.flipkart.com/viewcart?marketplace=GROCERY"
+            cart_url = "https://www.flipkart.com/viewcart"
             await page.goto(cart_url, timeout=60000)
             await page.wait_for_load_state('domcontentloaded')
             await asyncio.sleep(3)
@@ -911,7 +1198,7 @@ class CartManager:
             await job_queue.log_job(job_id, LogLevel.ERROR, f"Failed to check cart total: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    async def add_and_configure_products_in_cart(self, products: List[Dict], job_id: int, max_cart_value: float = None) -> Dict[str, Any]:
+    async def add_and_configure_products_in_cart(self, products: List[Dict], job_id: int, max_cart_value: float = None, automation_mode: str = "FLIPKART") -> Dict[str, Any]:
         """
         Phase 2: Navigate to each product page, add it to cart, and configure the quantity.
         Implements strict validation and cancellation conditions:
@@ -941,6 +1228,15 @@ class CartManager:
         for product in products:
             # Handle both 'link' and 'product_link' keys for backward compatibility
             product_link = product.get('link') or product.get('product_link')
+            
+            # Ensure product link has the correct marketplace parameter
+            if "marketplace=" not in product_link:
+                separator = "&" if "?" in product_link else "?"
+                product_link = f"{product_link}{separator}marketplace={automation_mode}"
+            elif f"marketplace={automation_mode}" not in product_link:
+                # Replace existing marketplace if it's different
+                product_link = re.sub(r'marketplace=[^&]+', f'marketplace={automation_mode}', product_link)
+
             desired_quantity = product.get('quantity', 1)
             
             try:
@@ -968,6 +1264,16 @@ class CartManager:
                     await self.browser_manager.capture_failure_screenshot(job_id, "cart_navigation_failed")
                     return {"success": False, "error": f"Navigation failed for {product_link}", "cancel_reason": "navigation_failed"}
                 
+                # Debug: Log page HTML for selector inspection
+                # try:
+                #     html_content = await page.content()
+                #     debug_file_path = f"product_page_debug_{job_id}.html"
+                #     with open(debug_file_path, "w", encoding="utf-8") as f:
+                #         f.write(html_content)
+                #     await job_queue.log_job(job_id, LogLevel.INFO, f"📄 Debug HTML saved to: {debug_file_path}")
+                # except Exception as debug_err:
+                #     await job_queue.log_job(job_id, LogLevel.WARNING, f"Could not save debug HTML: {str(debug_err)}")
+                
                 # Check if product is already in cart (quantity controls already visible)
                 plus_button_selector = "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(3) > div > div.css-175oi2r.r-1awozwy.r-1p0dtai.r-1777fci.r-1d2f490.r-u8s1d.r-zchlnj.r-ipm5af"
                 plus_button = page.locator(plus_button_selector)
@@ -975,23 +1281,26 @@ class CartManager:
                 if await plus_button.count() > 0:
                     await job_queue.log_job(job_id, LogLevel.INFO, f"Product {product_link} is already in cart. Adjusting quantity directly.")
                     # Product is already in cart, skip to quantity adjustment
-                    await job_queue.log_job(job_id, LogLevel.INFO, f"📦 Product already in cart, adjusting quantity...")
-                    quantity_success = await self._adjust_product_quantity(page, desired_quantity, job_id, product_link)
-                    if not quantity_success:
-                        await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Quantity verification failed for {product_link}")
-                        await self.browser_manager.capture_failure_screenshot(job_id, "cart_quantity_failed")
-                        return {"success": False, "error": f"Quantity not met for product {product_link}", "cancel_reason": "quantity_not_met"}
-                    
-                    # Double-check final quantity after adjustment
-                    final_check = await self._verify_actual_quantity(page, job_id, product_link, max_retries=3)
-                    if final_check != desired_quantity:
-                        await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Final quantity check failed. Expected: {desired_quantity}, Got: {final_check}")
-                        await self.browser_manager.capture_failure_screenshot(job_id, "cart_final_quantity_mismatch")
-                        return {"success": False, "error": f"Final quantity verification failed for {product_link}", "cancel_reason": "quantity_not_met"}
+                    if automation_mode == "GROCERY":
+                        await job_queue.log_job(job_id, LogLevel.INFO, f"📦 Product already in cart, adjusting quantity on product page...")
+                        quantity_success = await self._adjust_product_quantity(page, desired_quantity, job_id, product_link)
+                        if not quantity_success:
+                            await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Quantity verification failed for {product_link}")
+                            await self.browser_manager.capture_failure_screenshot(job_id, "cart_quantity_failed")
+                            return {"success": False, "error": f"Quantity not met for product {product_link}", "cancel_reason": "quantity_not_met"}
+                        
+                        # Double-check final quantity after adjustment
+                        final_check = await self._verify_actual_quantity(page, job_id, product_link, max_retries=3)
+                        if final_check != desired_quantity:
+                            await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Final quantity check failed. Expected: {desired_quantity}, Got: {final_check}")
+                            await self.browser_manager.capture_failure_screenshot(job_id, "cart_final_quantity_mismatch")
+                            return {"success": False, "error": f"Final quantity verification failed for {product_link}", "cancel_reason": "quantity_not_met"}
+                    else:
+                        await job_queue.log_job(job_id, LogLevel.INFO, f"⏭️ Skipping product-page quantity adjustment for Flipkart mode. Will adjust in cart.")
                     
                     added_products += 1
                     is_first_product = False  # No longer first product after processing
-                    await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Product quantity adjusted successfully (was already in cart): {product_link}")
+                    await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Product processed (was already in cart): {product_link}")
                     
                     # Wait for backend processing before moving to next product
                     await job_queue.log_job(job_id, LogLevel.INFO, "⏳ Waiting for backend processing...")
@@ -1022,89 +1331,83 @@ class CartManager:
                     await self.browser_manager.capture_failure_screenshot(job_id, "cart_product_unavailable")
                     return {"success": False, "error": f"Product unavailable: {product_link}", "cancel_reason": "product_unavailable"}
 
-                # 1.a) Click on 'Add' button to add product to cart (Mobile Grocery Flow)
-                add_button_selector = "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div"
+                # Combine all strategies: exact 'Add to cart', specific classes, and generic 'Add'
+                # Note: add_button_selector is defined as a fallback string
+                add_button_selector_str = "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div"
                 
-                # Check for Add button with multiple strategies
                 add_button_selectors = [
-                    # Priority 1: Class-based selector (user provided)
-                    '.r-1cenzwm',
-                    # Priority 2: Class-based selector from provided HTML structure
+                    # Priority 0: Exact text 'Add to cart' (most reliable for recent structure)
+                    'text="Add to cart"',
+                    # Priority 1: Specific class combination found in the provide HTML
+                    '.css-146c3p1.r-dnmrzs.r-1udh08x.r-1udbk01.r-3s2u2q.r-1iln25a',
+                    # Priority 2: Style-based selector provided by user
+                    'div[style*="border-radius: 0px"][style*="background: linear-gradient(90deg, rgb(255, 255, 255), rgb(255, 255, 255))"]',
+                    # Priority 3: Text-based with specific parent hint
+                    '.grid-formation div:has-text("Add to cart")',
+                    # Priority 4: Existing strategy for 'Add' text
                     'div.css-1rynq56:has-text("Add")',
-                    # Priority 3: Text-based selector
-                    'text="Add"',
-                    # Priority 4: More specific class combination
+                    # Priority 5: More specific class combination with 'Add'
                     'div.css-1rynq56.r-dnmrzs.r-1udh08x.r-1udbk01.r-3s2u2q.r-1iln25a:has-text("Add")',
-                    # Priority 5: Parent div with specific classes
+                    # Priority 6: User provided class
+                    '.r-1cenzwm',
+                    # Priority 7: Parent div with specific classes
                     'div.css-175oi2r.r-1awozwy.r-18u37iz:has-text("Add")',
-                    # Priority 6: Original nth-child selector as fallback
-                    add_button_selector,
-                    # Priority 7: Generic div with Add text
+                    # Priority 8: Original nth-child selector
+                    add_button_selector_str,
+                    # Priority 9: Generic div with Add text
                     'div:has-text("Add")',
-                    # Priority 8: Button-like element with Add
+                    # Priority 10: Button-like element with Add
                     '[role="button"]:has-text("Add")'
                 ]
                 
-                add_button_found = False
-                add_button_element = None
-                
+                click_success = False
                 for i, selector in enumerate(add_button_selectors):
                     try:
-                        add_button_element = page.locator(selector)
+                        add_button_element = page.locator(selector).first
                         if await add_button_element.count() > 0:
                             await job_queue.log_job(job_id, LogLevel.INFO, f"Add button found using strategy #{i+1}: {selector}")
-                            add_button_found = True
-                            break
-                    except Exception as e:
-                        await job_queue.log_job(job_id, LogLevel.INFO, f"Add button strategy #{i+1} failed: {str(e)}")
-                        continue
-                
-                if not add_button_found:
-                    await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: 'Add' button not found for {product_link}. Product may be unavailable.")
-                    await self.browser_manager.capture_failure_screenshot(job_id, "cart_add_button_not_found")
-                    return {"success": False, "error": f"Add button not found for product {product_link}", "cancel_reason": "product_unavailable"}
-                
-                await job_queue.log_job(job_id, LogLevel.INFO, "Clicking 'Add' button")
-                try:
-                    # Enhanced click with retry mechanism
-                    click_success = False
-                    for click_attempt in range(3):
-                        try:
+                            
+                            # Try to click this specific element
                             await add_button_element.scroll_into_view_if_needed()
                             await asyncio.sleep(0.5)
-                            await add_button_element.click(timeout=10000)
-                            await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Add button clicked successfully (attempt {click_attempt + 1})")
-                            click_success = True
-                            break
-                        except Exception as click_err:
-                            await job_queue.log_job(job_id, LogLevel.WARNING, f"Add button click attempt {click_attempt + 1} failed: {str(click_err)}")
-                            if click_attempt < 2:
-                                await asyncio.sleep(1)
-                                continue
-                    
-                    if not click_success:
-                        await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION STOPPED: Add button found but failed to click after 3 attempts for {product_link}")
-                        await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ PRODUCT MARKED AS OUT OF STOCK: Product may be unavailable or experiencing technical issues")
-                        await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ ACCOUNT AUTOMATION CANCELLED: Unable to add product to cart")
-                        await self.browser_manager.capture_failure_screenshot(job_id, "cart_add_button_click_failed")
-                        return {"success": False, "error": f"Add button click failed after 3 attempts for product {product_link}", "cancel_reason": "product_out_of_stock"}
-                    
+                            
+                            try:
+                                await add_button_element.click(timeout=8000)
+                                await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Add button clicked successfully using strategy #{i+1}")
+                                click_success = True
+                                break # Success! Exit the selector loop
+                            except Exception as click_err:
+                                await job_queue.log_job(job_id, LogLevel.WARNING, f"⚠️ Strategy #{i+1} found element but click failed: {str(click_err)}. Trying next strategy...")
+                                continue # Try next selector in the outer loop
+                                
+                    except Exception as e:
+                        await job_queue.log_job(job_id, LogLevel.DEBUG, f"Add button strategy #{i+1} search failed: {str(e)}")
+                        continue
+                
+                if not click_success:
+                    await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: All 'Add' button strategies failed for {product_link}")
+                    await self.browser_manager.capture_failure_screenshot(job_id, "cart_add_all_strategies_failed")
+                    return {"success": False, "error": f"Failed to add product {product_link} after trying all selectors", "cancel_reason": "product_unavailable"}
+                
+                # If click was successful, continue with popup handling and verification
+                try:
                     await asyncio.sleep(2)  # Wait for potential popup or quantity controls
                     
-                    # Check for grocery basket popup only for the first product
-                    if is_first_product:
+                    # Check for grocery basket popup only for the first product in GROCERY mode
+                    if is_first_product and automation_mode == "GROCERY":
                         await job_queue.log_job(job_id, LogLevel.INFO, "🔍 Checking for grocery basket popup (first product only)...")
                         popup_handled = await self._handle_grocery_basket_popup(page, job_id)
                         if not popup_handled:
                             await job_queue.log_job(job_id, LogLevel.WARNING, "Popup handling may have failed, continuing...")
                         await asyncio.sleep(3)  # Wait for quantity controls after popup handling
                     else:
-                        await job_queue.log_job(job_id, LogLevel.INFO, "⏭️ Skipping popup check (not first product)")
-                        await asyncio.sleep(2)  # Shorter wait for subsequent products
+                        if is_first_product:
+                            await job_queue.log_job(job_id, LogLevel.INFO, f"⏭️ Skipping grocery popup check for {automation_mode} mode")
+                        await asyncio.sleep(2)  # Normal wait for subsequent products or non-grocery
+
                     
                     # Verify that the product was actually added by checking for quantity controls
                     plus_button_selector = "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(3) > div > div.css-175oi2r.r-1awozwy.r-1p0dtai.r-1777fci.r-1d2f490.r-u8s1d.r-zchlnj.r-ipm5af"
-                    plus_button = page.locator(plus_button_selector)
                     
                     # Also check for alternative quantity control indicators
                     quantity_indicators = [
@@ -1141,32 +1444,40 @@ class CartManager:
                             await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Product not added to cart for {product_link} - no quantity controls found after verification.")
                             return {"success": False, "error": f"Product not added to cart: {product_link}", "cancel_reason": "product_not_added"}
                         
-                except Exception as click_error:
-                    await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Failed to click 'Add' button for {product_link}: {str(click_error)}")
-                    return {"success": False, "error": f"Failed to add product {product_link}: {str(click_error)}", "cancel_reason": "add_button_failed"}
+                except Exception as verify_err:
+                    await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Verification failed for {product_link}: {str(verify_err)}")
+                    return {"success": False, "error": f"Verification failed for {product_link}: {str(verify_err)}", "cancel_reason": "verification_failed"}
 
                 # 1.b) Now manipulate the quantity using mobile grocery selectors
-                await job_queue.log_job(job_id, LogLevel.INFO, f"🔧 Adjusting quantity for newly added product...")
-                quantity_success = await self._adjust_product_quantity(page, desired_quantity, job_id, product_link)
-                if not quantity_success:
-                    await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Quantity verification failed for {product_link}")
-                    return {"success": False, "error": f"Quantity not met for product {product_link}", "cancel_reason": "quantity_not_met"}
-                
-                # Triple-check final quantity after adjustment (critical verification)
-                await asyncio.sleep(1)  # Allow UI to fully update
-                final_check = await self._verify_actual_quantity(page, job_id, product_link, max_retries=5)
-                if final_check != desired_quantity:
-                    await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Critical final quantity check failed. Expected: {desired_quantity}, Got: {final_check}")
-                    return {"success": False, "error": f"Critical quantity verification failed for {product_link}", "cancel_reason": "quantity_not_met"}
+                if automation_mode == "GROCERY":
+                    await job_queue.log_job(job_id, LogLevel.INFO, f"🔧 Adjusting quantity for newly added product (Grocery)...")
+                    quantity_success = await self._adjust_product_quantity(page, desired_quantity, job_id, product_link)
+                    if not quantity_success:
+                        await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Quantity verification failed for {product_link}")
+                        return {"success": False, "error": f"Quantity not met for product {product_link}", "cancel_reason": "quantity_not_met"}
+                    
+                    # Triple-check final quantity after adjustment (critical verification)
+                    await asyncio.sleep(1)  # Allow UI to fully update
+                    final_check = await self._verify_actual_quantity(page, job_id, product_link, max_retries=5)
+                    if final_check != desired_quantity:
+                        await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Critical final quantity check failed. Expected: {desired_quantity}, Got: {final_check}")
+                        return {"success": False, "error": f"Critical quantity verification failed for {product_link}", "cancel_reason": "quantity_not_met"}
+                else:
+                    await job_queue.log_job(job_id, LogLevel.INFO, f"⏭️ Skipping product-page quantity adjustment for Flipkart mode. Will adjust in cart.")
+
                 
                 # Product successfully added and configured
                 added_products += 1
                 is_first_product = False  # No longer first product after successful addition
-                await job_queue.log_job(job_id, LogLevel.INFO, f"🎉 Product successfully added and configured: {product_link} (Quantity: {final_check})")
+                
+                # Log success based on mode
+                status_msg = f"(Quantity: {final_check})" if automation_mode == "GROCERY" else "(Quantity will be set in cart)"
+                await job_queue.log_job(job_id, LogLevel.INFO, f"🎉 Product successfully added: {product_link} {status_msg}")
                 
                 # Wait for backend processing before moving to next product
                 await job_queue.log_job(job_id, LogLevel.INFO, "⏳ Waiting for backend processing...")
                 await asyncio.sleep(3)  # Increased wait time for stability
+
 
             except Exception as e:
                 await job_queue.log_job(job_id, LogLevel.ERROR, f"❌ AUTOMATION CANCELLED: Failed to process product {product_link}: {str(e)}")
@@ -1187,10 +1498,217 @@ class CartManager:
             return {"success": False, "error": "No products added to cart", "cancel_reason": "no_products_added"}
 
         # Navigate to cart after all products are processed
-        await job_queue.log_job(job_id, LogLevel.INFO, "Navigating to grocery cart...")
-        cart_url = "https://www.flipkart.com/viewcart?marketplace=GROCERY"
-        await page.goto(cart_url, timeout=60000)
-        await page.wait_for_load_state('domcontentloaded')
-        await asyncio.sleep(3)
+        if automation_mode == "FLIPKART":
+            await self._navigate_to_cart_safely(page, job_id, automation_mode)
+        else:
+            marketplace = "GROCERY" if automation_mode == "GROCERY" else "FLIPKART"
+            await job_queue.log_job(job_id, LogLevel.INFO, f"Navigating to {marketplace.lower()} cart...")
+            cart_url = f"https://www.flipkart.com/viewcart?marketplace={marketplace}"
+            await page.goto(cart_url, timeout=60000)
+            await page.wait_for_load_state('domcontentloaded')
+            await asyncio.sleep(3)
+
+        # For Flipkart, adjust quantities in the cart
+        if automation_mode == "FLIPKART":
+            await job_queue.log_job(job_id, LogLevel.INFO, "🛒 Adjusting quantities in the Flipkart cart...")
+            await self.set_cart_quantities_flipkart(page, job_id, products)
 
         return {"success": True, "added_products": added_products, "total_products": total_products}
+
+    async def set_cart_quantities_flipkart(self, page: Any, job_id: int, products: List[Dict]) -> bool:
+        """Set quantities for Flipkart products directly in the cart using the Qty dropdown."""
+        try:
+            # Re-ensure we're on the cart page
+            if "viewcart" not in page.url:
+                await self._navigate_to_cart_safely(page, job_id, "FLIPKART")
+
+            # Find all item cards in the cart
+            item_cards_selector = 'div.css-g5y9jx.r-14lw9ot'
+            cards = page.locator(item_cards_selector)
+            card_count = await cards.count()
+            
+            if card_count == 0:
+                await job_queue.log_job(job_id, LogLevel.WARNING, "No item cards found in cart for quantity adjustment")
+                return False
+
+            await job_queue.log_job(job_id, LogLevel.INFO, f"Scanning {card_count} items in cart for quantity adjustment...")
+
+            for i in range(card_count):
+                card = cards.nth(i)
+                try:
+                    # Get product name and variant (sometimes split in two divs)
+                    # User HTML: <div dir="auto" class="css-146c3p1 r-dnmrzs r-1udh08x r-1udbk01 r-3s2u2q r-1iln25a r-cqee49 r-1et8rh5 r-ubezar">SOFTSPUN Microfiber Vehicle Washing  Cloth </div>
+                    name_selector = 'div.css-146c3p1.r-dnmrzs.r-1udh08x.r-1udbk01.r-3s2u2q.r-1iln25a, div.r-cqee49.r-1et8rh5.r-ubezar'
+                    name_locs = card.locator(name_selector)
+                    
+                    name_texts = []
+                    for ni in range(await name_locs.count()):
+                        name_texts.append(await name_locs.nth(ni).inner_text())
+                    
+                    if not name_texts:
+                        # Fallback: search any text div that doesn't contain "Qty:" or "₹" or "Deal"
+                        name_candidates = card.locator('div.css-146c3p1')
+                        for ni in range(await name_candidates.count()):
+                            txt = await name_candidates.nth(ni).inner_text()
+                            if len(txt) > 15 and "Qty:" not in txt and "₹" not in txt and "Deal" not in txt:
+                                name_texts.append(txt)
+                    
+                    if not name_texts:
+                        continue
+                    
+                    # Combine all name parts and normalize whitespace (handles double spaces)
+                    import re
+                    cart_product_name = re.sub(r'\s+', ' ', ' '.join(name_texts)).strip().lower()
+                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Checking cart item: {cart_product_name[:60]}...")
+
+                    # Find matching product in the list using word overlap (Token Matching)
+                    target_product = None
+                    best_overlap = 0.0
+                    
+                    def get_tokens(s):
+                        return set(re.findall(r'\w+', s.lower()))
+
+                    cart_tokens = get_tokens(cart_product_name)
+                    
+                    for p in products:
+                        # Check multiple field names for robustness
+                        p_name = p.get('product_name') or p.get('name') or p.get('title', '')
+                        if not p_name: continue
+                        
+                        req_tokens = get_tokens(p_name)
+                        if not req_tokens: continue
+                        
+                        intersection = cart_tokens.intersection(req_tokens)
+                        overlap = len(intersection) / len(req_tokens)
+                        
+                        if overlap > best_overlap:
+                            best_overlap = overlap
+                            if overlap >= 0.5: # 50% or more words must match
+                                target_product = p
+                    
+                    if not target_product:
+                        # If no direct name match, try checking the first product if there's only one
+                        if len(products) == 1:
+                            target_product = products[0]
+                            await job_queue.log_job(job_id, LogLevel.DEBUG, "Auto-matching single product in list")
+                        else:
+                            await job_queue.log_job(job_id, LogLevel.DEBUG, f"No match for '{cart_product_name[:30]}' (Best overlap: {best_overlap:.2f}, Cart Tokens: {list(cart_tokens)[:5]}...)")
+                            continue
+
+                    desired_qty = target_product.get('quantity', 1)
+                    if desired_qty <= 1:
+                        # Already 1 by default, check if we need to do anything
+                        qty_text_loc = card.locator('div:has-text("Qty:")').first
+                        if await qty_text_loc.count() > 0:
+                            current_qty_text = await qty_text_loc.inner_text()
+                            if f"Qty: {desired_qty}" in current_qty_text:
+                                await job_queue.log_job(job_id, LogLevel.INFO, f"✅ '{cart_product_name[:30]}' is already at Qty: {desired_qty}")
+                                continue
+
+                    await job_queue.log_job(job_id, LogLevel.INFO, f"⚙️ Setting quantity for '{cart_product_name[:30]}' to {desired_qty}...")
+
+                    # Find Qty dropdown in this card
+                    qty_selector = 'div.css-146c3p1:has-text("Qty:")'
+                    qty_dropdown = card.locator(qty_selector).first
+                    
+                    if await qty_dropdown.count() == 0:
+                        qty_dropdown = card.locator('div:has-text("Qty:")').first
+                    
+                    if await qty_dropdown.count() > 0:
+                        await qty_dropdown.scroll_into_view_if_needed()
+                        await asyncio.sleep(0.5)
+                        
+                        # Click the interactive parent if possible
+                        try:
+                            interactive_parent = qty_dropdown.locator('xpath=ancestor::div[@style*="cursor: pointer"]').first
+                            if await interactive_parent.count() > 0:
+                                await interactive_parent.click()
+                            else:
+                                await qty_dropdown.click()
+                        except Exception:
+                            await qty_dropdown.click()
+                        
+                        await job_queue.log_job(job_id, LogLevel.DEBUG, "Clicked Qty dropdown")
+                        await asyncio.sleep(1.5) # Wait for selection sheet
+
+                        # Now look for the quantity option in the bottom sheet
+                        option_clicked = False
+                        
+                        # Priority selection: Only pick the option if it's the target number
+                        num_regex = re.compile(f"^\\s*{desired_qty}\\s*$")
+                        
+                        # Only try direct selection for 1, 2, 3 as these are always present
+                        if desired_qty <= 3:
+                            try:
+                                options = page.locator('div.css-146c3p1').filter(has_text=num_regex)
+                                if await options.count() > 0:
+                                    await options.first.scroll_into_view_if_needed()
+                                    await options.first.click(force=True)
+                                    option_clicked = True
+                            except Exception:
+                                pass
+
+                        if not option_clicked:
+                            # If desired quantity > 3 or wasn't found directly, look for 'More' or '10+'
+                            try:
+                                more_patterns = [
+                                    re.compile(r"10\+", re.I),
+                                    re.compile(r"More", re.I),
+                                    re.compile(r"^[4-9]\s*$", re.I) # Sometimes 4, 5 etc can be selected directly too
+                                ]
+                                
+                                # Try direct match first for any number
+                                direct_opt = page.locator('div.css-146c3p1').filter(has_text=num_regex).first
+                                if await direct_opt.count() > 0:
+                                    await direct_opt.click(force=True)
+                                    option_clicked = True
+                                
+                                if not option_clicked:
+                                    # Fallback to "More" button
+                                    for pattern in [re.compile(r"More", re.I), re.compile(r"10\+", re.I)]:
+                                        more_opt = page.locator('div.css-146c3p1').filter(has_text=pattern).first
+                                        if await more_opt.count() > 0:
+                                            await job_queue.log_job(job_id, LogLevel.DEBUG, f"Clicking 'More' quantity option")
+                                            await more_opt.click(force=True)
+                                            await asyncio.sleep(1.2)
+                                            
+                                            # Manual Input Field
+                                            qty_input = page.locator('input[placeholder="Quantity"], input[type="number"], input[role="spinbutton"]').first
+                                            if await qty_input.count() > 0:
+                                                await qty_input.fill(str(desired_qty))
+                                                await asyncio.sleep(0.5)
+                                                # Click APPLY
+                                                apply_btn = page.locator('div:has-text("APPLY"), [role="button"]:has-text("APPLY")').last
+                                                if await apply_btn.count() > 0:
+                                                    try:
+                                                        parent_clickable = apply_btn.locator('xpath=./ancestor-or-self::div[contains(@style, "cursor: pointer")]').last
+                                                        if await parent_clickable.count() > 0:
+                                                            await parent_clickable.click(force=True)
+                                                        else:
+                                                            await apply_btn.click(force=True)
+                                                    except Exception:
+                                                        await apply_btn.click(force=True)
+                                                        
+                                                    option_clicked = True
+                                                    await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Manually set quantity to {desired_qty}")
+                                            break
+                            except Exception as e:
+                                await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed to select quantity: {e}")
+
+                        if option_clicked:
+                            await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Quantity updated to {desired_qty}")
+                            await asyncio.sleep(2.5) # Wait for cart update
+                        else:
+                            await job_queue.log_job(job_id, LogLevel.WARNING, f"❌ Could not find option '{desired_qty}'")
+                    else:
+                        await job_queue.log_job(job_id, LogLevel.WARNING, f"❌ Could not find Qty dropdown for '{cart_product_name[:30]}'")
+
+                except Exception as card_err:
+                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Error processing cart item {i+1}: {str(card_err)}")
+                    continue
+
+            return True
+        except Exception as e:
+            await job_queue.log_job(job_id, LogLevel.ERROR, f"Error adjusting cart quantities: {str(e)}")
+            return False
+

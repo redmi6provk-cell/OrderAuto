@@ -48,8 +48,7 @@ class AddressCreate(BaseModel):
     def validate_address_template(cls, v):
         if not v or not v.strip():
             raise ValueError('Address template cannot be empty')
-        if '{office_no}' not in v:
-            raise ValueError('Address template must contain {office_no} placeholder')
+        # We no longer require {office_no} to be present, allowing for static addresses
         return v.strip()
 
 

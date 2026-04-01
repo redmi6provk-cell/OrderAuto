@@ -85,22 +85,22 @@ class AutomationWorker:
         return await self.auth_handler.login_to_flipkart(email, job_id, view_mode)
 
     # Delegate cart management methods
-    async def add_and_configure_products_in_cart(self, products: List[Dict], job_id: int, max_cart_value: float = None) -> Dict[str, Any]:
-        """Phase 2: Navigate to each product page, add it to cart, and configure the quantity."""
-        return await self.cart_manager.add_and_configure_products_in_cart(products, job_id, max_cart_value)
+    async def add_and_configure_products_in_cart(self, products: List[Dict], job_id: int, max_cart_value: float = None, automation_mode: str = "FLIPKART") -> Dict[str, Any]:
+        """Proxy to CartManager"""
+        return await self.cart_manager.add_and_configure_products_in_cart(products, job_id, max_cart_value, automation_mode)
 
     # Delegate checkout methods
-    async def select_correct_address(self, job_id: int) -> bool:
-        """Check current address and select the correct one if needed"""
-        return await self.checkout_handler.select_correct_address(job_id)
+    async def select_correct_address(self, job_id: int, address_id: Optional[int] = None, retry_count: int = 0, automation_mode: str = "FLIPKART") -> bool:
+        """Proxy to CheckoutHandler"""
+        return await self.checkout_handler.select_correct_address(job_id, address_id, retry_count, automation_mode)
 
     async def validate_cart_total(self, page: Any, job_id: int, max_cart_value: Optional[float] = None) -> bool:
         """Validate cart total amount against maximum cart value limit"""
         return await self.checkout_handler.validate_cart_total(page, job_id, max_cart_value)
 
-    async def complete_checkout_process(self, job_id: int, max_cart_value: float = None, address_id: Optional[int] = None, gstin: Optional[str] = None, business_name: Optional[str] = None, steal_deal_product: Optional[str] = None) -> Dict[str, Any]:
-        """Complete the checkout process: Order Summary -> Payments -> Place Order"""
-        return await self.checkout_handler.complete_checkout_process(job_id, max_cart_value, address_id, gstin, business_name, steal_deal_product)
+    async def complete_checkout_process(self, job_id: int, max_cart_value: float = None, address_id: Optional[int] = None, gstin: Optional[str] = None, business_name: Optional[str] = None, steal_deal_product: Optional[str] = None, automation_mode: str = "FLIPKART") -> Dict[str, Any]:
+        """Proxy to CheckoutHandler"""
+        return await self.checkout_handler.complete_checkout_process(job_id, max_cart_value, address_id, gstin, business_name, steal_deal_product, automation_mode)
 
     # Legacy methods for backward compatibility
     async def create_browser_context(self, user_data: Dict[str, Any]) -> bool:
@@ -563,9 +563,8 @@ class AutomationWorker:
             
             await job_queue.log_job(job_id, LogLevel.INFO, "Product added to cart")
             
-            # Go to cart
-            await page.goto('https://www.flipkart.com/viewcart')
-            await asyncio.sleep(3)
+            # Go to cart safely (via Home page) to avoid redirects
+            await self._navigate_to_cart_safely(page, job_id, "FLIPKART")
             
             # Place order
             place_order_btn = page.locator('span:has-text("Place Order")').first
@@ -717,6 +716,20 @@ class AutomationWorker:
         except Exception as e:
             await job_queue.log_job(job_id, LogLevel.ERROR, f"Failed to remove addresses: {str(e)}")
             return False
+
+    async def _navigate_to_cart_safely(self, page: Any, job_id: int, automation_mode: str):
+        """Navigate to Home page first, then to the Cart to bypass interstitial ads."""
+        try:
+            await job_queue.log_job(job_id, LogLevel.INFO, "🏠 Resetting navigation via Home page...")
+            await page.goto('https://www.flipkart.com/', wait_until='domcontentloaded')
+            await asyncio.sleep(1.0)
+            
+            cart_url = f'https://www.flipkart.com/viewcart?marketplace={automation_mode}'
+            await job_queue.log_job(job_id, LogLevel.INFO, f"🛒 Navigating to cart: {cart_url}")
+            await page.goto(cart_url, wait_until='domcontentloaded')
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            await job_queue.log_job(job_id, LogLevel.ERROR, f"Failed safe navigation: {str(e)}")
 
     async def add_address_mobile(self, job_id: int, address_id: Optional[int] = None) -> bool:
         """Add address using mobile Flipkart interface"""
