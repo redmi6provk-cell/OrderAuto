@@ -6,6 +6,11 @@ import os
 # This MUST be the first thing that happens
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    try:
+        import uvicorn.loops.asyncio
+        uvicorn.loops.asyncio.asyncio_setup = lambda use_subprocess=False, **kwargs: asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except ImportError:
+        pass
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -123,7 +128,5 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
-        loop="asyncio"
+        port=8000
     ) 

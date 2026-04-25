@@ -421,20 +421,257 @@ class CartManager:
                         await job_queue.log_job(job_id, LogLevel.DEBUG, f"Remove button search/click failed: {e}")
 
                 elif automation_mode == "GROCERY":
-                    # Strategy for Grocery: Use minus buttons to decrement quantities to 0
+                    # Strategy for Grocery: 
+                    # 1. Try to find and click any direct "Remove" or "Trash" buttons first (Faster)
+                    # 2. Use minus buttons to decrement quantities to 0 (Fallback)
                     try:
-                        minus_buttons = []
+                        made_progress_this_sub_iteration = False
                         cart_area = page.locator('#_parentCtr_')
+                        
+                        # A. DIRECT REMOVAL STRATEGY (Trash/Remove Icons)
+                        remove_buttons = []
+                        seen_remove_handles = set()
+
+                        def remember_remove_button(btn: Any) -> None:
+                            handle = str(btn)
+                            if handle not in seen_remove_handles:
+                                seen_remove_handles.add(handle)
+                                remove_buttons.append(btn)
+
+                        async def is_quantity_group_control(btn: Any) -> bool:
+                            try:
+                                handle = await btn.element_handle()
+                                if not handle:
+                                    return False
+                                return await page.evaluate(
+                                    """(el) => {
+                                        const parent = el?.parentElement;
+                                        if (!parent) return false;
+                                        const children = Array.from(parent.children || []);
+                                        if (children.length < 3) return false;
+                                        const hasCountSibling = children.some((child, idx) => idx > 0 && idx < children.length - 1 && child.innerText && /^\\s*\\d+\\s*$/.test(child.innerText.trim()));
+                                        return hasCountSibling;
+                                    }""",
+                                    handle
+                                )
+                            except Exception:
+                                return False
+                        
+                        # Prefer direct Remove/Delete actions for every cart item first.
+                        # Some grocery cards expose an actual button, some expose only text inside
+                        # a touchable wrapper, and some out-of-stock cards render a different layout.
+                        try:
+                            remove_selectors = [
+                                'text=/^\\s*(Remove|Delete)\\s*$/i',
+                                'div.css-g5y9jx.r-1awozwy.r-9kzrz9.r-1jkafct.r-18u37iz.r-mabqd8.r-1777fci.r-1yvhtrz',
+                                'div[style*="cursor: pointer"] div:has-text("Remove")',
+                                'div[style*="cursor: pointer"] div:has-text("Delete")',
+                                'button:has-text("Remove")',
+                                'button:has-text("Delete")',
+                                '[role="button"]:has-text("Remove")',
+                                '[role="button"]:has-text("Delete")',
+                                'div:has-text("Remove")',
+                                'div:has-text("Delete")',
+                                'div:has-text("Out Of Stock") ~ div div:has-text("Remove")',
+                                'div:has-text("Out of Stock") ~ div div:has-text("Remove")',
+                                'div.css-g5y9jx:has-text("Remove")',
+                            ]
+                            for selector in remove_selectors:
+                                candidates = cart_area.locator(selector)
+                                rc = await candidates.count()
+                                for i in range(rc):
+                                    candidate = candidates.nth(i)
+                                    try:
+                                        if await is_quantity_group_control(candidate):
+                                            continue
+                                        clickable = candidate.locator(
+                                            'xpath=./ancestor-or-self::*['
+                                            'self::button or @role="button" or '
+                                            'contains(@style, "cursor: pointer")'
+                                            '][1]'
+                                        )
+                                        if await clickable.count() > 0:
+                                            if await is_quantity_group_control(clickable.first):
+                                                continue
+                                            remember_remove_button(clickable.first)
+                                        else:
+                                            remember_remove_button(candidate)
+                                    except Exception:
+                                        remember_remove_button(candidate)
+                        except Exception:
+                            pass
+
+                        # User-provided specific trash icon image
+                        try:
+                            trash_imgs = cart_area.locator('img[src*="d60e8bff-fbc8-4bed-b299-bfddaaa75b20"]')
+                            tc = await trash_imgs.count()
+                            for i in range(tc):
+                                # Prefer the tight wrapper around the trash icon before falling back
+                                # to broader ancestors so we click the exact control.
+                                tight_parent = trash_imgs.nth(i).locator('xpath=./ancestor::div[@style][1]')
+                                if await tight_parent.count() > 0:
+                                    if not await is_quantity_group_control(tight_parent.first):
+                                        remember_remove_button(tight_parent.first)
+                                else:
+                                    parent = trash_imgs.nth(i).locator('xpath=./ancestor::div[contains(@class, "css-g5y9jx")][1]')
+                                    if await parent.count() > 0:
+                                        if not await is_quantity_group_control(parent.first):
+                                            remember_remove_button(parent.first)
+                                    else:
+                                        remember_remove_button(trash_imgs.nth(i))
+                        except Exception:
+                            pass
+                            
+                        # If found direct removal buttons, click them first
+                        if len(remove_buttons) > 0:
+                            await job_queue.log_job(job_id, LogLevel.INFO, f"Found {len(remove_buttons)} direct Remove/Trash button(s)")
+                            for idx, btn in enumerate(remove_buttons):
+                                try:
+                                    await btn.scroll_into_view_if_needed()
+                                    await asyncio.sleep(0.2)
+                                    if await btn.is_visible(timeout=1000):
+                                        try:
+                                            await btn.click(timeout=2000, force=True)
+                                        except Exception:
+                                            await btn.tap(timeout=2000)
+                                        removed += 1
+                                        made_progress = True
+                                        made_progress_this_sub_iteration = True
+                                        await job_queue.log_job(job_id, LogLevel.INFO, f"Clicked Remove button {idx+1}")
+                                        
+                                        # Handle any confirmation modal that might appear
+                                        try:
+                                            confirm = page.locator('div:has-text("Remove Item"), div:has-text("Are you sure")').get_by_text("Remove").last
+                                            if await confirm.count() > 0 and await confirm.is_visible(timeout=1000):
+                                                await confirm.click()
+                                                await asyncio.sleep(0.5)
+                                        except Exception:
+                                            pass
+                                            
+                                        await asyncio.sleep(0.5)
+                                        # After one removal, the list might shift, so we break and let the outer loop refresh
+                                        break 
+                                except Exception as e:
+                                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed to click Remove {idx+1}: {e}")
+                                    continue
+                            
+                            if made_progress_this_sub_iteration:
+                                # A successful remove usually re-renders the grocery cart. Stop
+                                # here and let the next outer iteration rediscover the remaining
+                                # controls from the fresh DOM instead of reusing shifted nodes.
+                                await asyncio.sleep(0.8)
+                                continue
+
+                        # B. DECREMENT STRATEGY (Minus Buttons)
+                        minus_buttons = []
+                        seen_minus_handles = set()
+
+                        def remember_minus_button(btn: Any) -> None:
+                            handle = str(btn)
+                            if handle not in seen_minus_handles:
+                                seen_minus_handles.add(handle)
+                                minus_buttons.append(btn)
+
+                        async def is_first_control_in_quantity_group(btn: Any) -> bool:
+                            try:
+                                handle = await btn.element_handle()
+                                if not handle:
+                                    return False
+                                return await page.evaluate(
+                                    """(el) => {
+                                        const parent = el?.parentElement;
+                                        if (!parent) return false;
+                                        const children = Array.from(parent.children || []);
+                                        if (children.length < 3) return false;
+                                        const hasCountSibling = children.some((child, idx) => idx > 0 && idx < children.length - 1 && child.innerText && /^\\s*\\d+\\s*$/.test(child.innerText.trim()));
+                                        return hasCountSibling && el === parent.firstElementChild;
+                                    }""",
+                                    handle
+                                )
+                            except Exception:
+                                return False
+
+                        # Prefer exact 3-part quantity controls: [-][count][+]
+                        try:
+                            quantity_groups = cart_area.locator(
+                                'div:has(> div:text-is("-")):has(> div.r-1aockid):has(> div:text-is("+"))'
+                            )
+                            qgc = await quantity_groups.count()
+                            for i in range(qgc):
+                                try:
+                                    # EXPLICITLY find the child with the minus sign, DO NOT rely on index
+                                    minus = quantity_groups.nth(i).locator('> div:text-is("-")').first
+                                    if await minus.count() > 0:
+                                        remember_minus_button(minus)
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+
+                        try:
+                            icon_minus_wrappers = cart_area.locator(
+                                'div.css-g5y9jx.r-1awozwy.r-9kzrz9.r-1jkafct.r-18u37iz.r-mabqd8.r-1777fci.r-1yvhtrz'
+                            )
+                            imc = await icon_minus_wrappers.count()
+                            for i in range(imc):
+                                wrapper = icon_minus_wrappers.nth(i)
+                                if await is_first_control_in_quantity_group(wrapper):
+                                    remember_minus_button(wrapper)
+                        except Exception:
+                            pass
+
                         containers = cart_area.locator('div.css-175oi2r.r-1awozwy.r-qwd59z.r-18u37iz.r-mabqd8.r-1777fci.r-7bouqp')
                         c = await containers.count()
                         
                         for i in range(c):
                             try:
-                                minus = containers.nth(i).locator('> div:nth-child(1)')
+                                # Look for minus sign within the container instead of assuming first child
+                                minus = containers.nth(i).locator('div:text-is("-")').first
                                 if await minus.count() > 0:
-                                    minus_buttons.append(minus.first)
+                                    remember_minus_button(minus)
                             except Exception:
                                 continue
+
+                        # React Native Web quantity controls often render as [-][count][+].
+                        # Find the count (r-1aockid) and ensure we only take the sibling that is actually a minus
+                        try:
+                            quantity_displays = cart_area.locator('div.r-1aockid')
+                            qdc = await quantity_displays.count()
+                            for i in range(qdc):
+                                try:
+                                    # Check preceding sibling
+                                    prev = quantity_displays.nth(i).locator('xpath=preceding-sibling::*[1]')
+                                    if await prev.count() > 0:
+                                        txt = await prev.inner_text()
+                                        # Only trust controls that explicitly expose a minus signal.
+                                        if "-" in txt:
+                                            remember_minus_button(prev.first)
+                                        elif not txt:
+                                            # If no text, only accept known minus icons.
+                                            is_minus_icon = await prev.locator('img[src*="beb19156"]').count() > 0
+                                            if is_minus_icon:
+                                                remember_minus_button(prev.first)
+                                            else:
+                                                try:
+                                                    # Many grocery controls render icon-only [-][count][+].
+                                                    # Trust the preceding sibling when it is the first child
+                                                    # of a 3-part quantity group and is not a plus icon.
+                                                    is_first_of_group = await page.evaluate(
+                                                        '(el) => { const parent = el?.parentElement; return !!parent && parent.children.length >= 3 && el === parent.firstElementChild; }',
+                                                        await prev.first.element_handle()
+                                                    )
+                                                    has_plus_icon = await prev.locator('img[src*="7b4a2e58"], img[src*="plus"]').count() > 0
+                                                    if is_first_of_group and not has_plus_icon:
+                                                        remember_minus_button(prev.first)
+                                                except Exception:
+                                                    pass
+                                    
+                                    # If preceding was definitely a plus (rare), check following
+                                    # But usually minus is on the left
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
                         
                         if len(minus_buttons) == 0:
                             # 1. Try specific minus icon image
@@ -444,39 +681,77 @@ class CartManager:
                                 for i in range(ic):
                                     parent = imgs.nth(i).locator('xpath=..')
                                     if await parent.count() > 0:
-                                        minus_buttons.append(parent.first)
+                                        if await is_first_control_in_quantity_group(parent.first):
+                                            remember_minus_button(parent.first)
                             except Exception:
                                 pass
                                 
                             # 2. Try generic text or role based minus buttons
                             try:
-                                generic_minus = page.locator('div:has-text("-"):visible, [role="button"]:has-text("-"):visible')
+                                generic_minus = page.locator('div:text-is("-"):visible, [role="button"]:text-is("-"):visible')
                                 gm_count = await generic_minus.count()
                                 for i in range(gm_count):
-                                    minus_buttons.append(generic_minus.nth(i))
+                                    remember_minus_button(generic_minus.nth(i))
                             except Exception:
                                 pass
                         
                         if len(minus_buttons) > 0:
                             await job_queue.log_job(job_id, LogLevel.INFO, f"Found {len(minus_buttons)} potential minus button(s)")
                             
-                        for idx, btn in enumerate(minus_buttons):
-                            try:
-                                # Scroll button into view
-                                await btn.scroll_into_view_if_needed()
-                                await asyncio.sleep(0.2)
-                                
-                                if await btn.is_visible(timeout=1000):
-                                    await btn.click(timeout=2000)
-                                    decremented += 1
-                                    made_progress = True
-                                    await job_queue.log_job(job_id, LogLevel.INFO, f"Clicked minus button {idx+1}")
-                                    await asyncio.sleep(0.3)
-                            except Exception as e:
-                                await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed to click minus {idx+1}: {e}")
-                                continue
+                            for idx, btn in enumerate(minus_buttons):
+                                try:
+                                    # Scroll button into view
+                                    await btn.scroll_into_view_if_needed()
+                                    await asyncio.sleep(0.2)
+                                    
+                                    if await btn.is_visible(timeout=1000):
+                                        try:
+                                            btn_text = (await btn.inner_text(timeout=1000)).strip()
+                                            
+                                            # STRICT CHECK: If it contains + but no -, it's definitely a plus button
+                                            if "+" in btn_text and "-" not in btn_text:
+                                                await job_queue.log_job(job_id, LogLevel.DEBUG, f"🚫 Skipping PLUS button mistakenly identified as minus: '{btn_text}'")
+                                                continue
+                                            
+                                            # If text is empty, check for icons
+                                            if not btn_text:
+                                                # If it contains a plus icon (we'll look for common plus icon patterns)
+                                                if await btn.locator('img[src*="7b4a2e58"], img[src*="plus"]').count() > 0:
+                                                    await job_queue.log_job(job_id, LogLevel.DEBUG, "🚫 Skipping element with plus icon.")
+                                                    continue
+                                                if await btn.locator('img[src*="beb19156"]').count() == 0:
+                                                    await job_queue.log_job(job_id, LogLevel.DEBUG, "Skipping ambiguous quantity control with no minus signal.")
+                                                    continue
+
+                                                # If it doesn't have a minus icon but its sibling does? 
+                                                # Actually, if it's the right-most child of a quantity group, it's plus
+                                                try:
+                                                    is_plus = await page.evaluate('(el) => { const parent = el.parentElement; if (!parent) return false; return el === parent.lastElementChild && parent.children.length >= 3; }', await btn.element_handle())
+                                                    if is_plus:
+                                                        await job_queue.log_job(job_id, LogLevel.DEBUG, "🚫 Skipping right-most element (likely plus button)")
+                                                        continue
+                                                except Exception:
+                                                    pass
+                                            
+                                            # EXTRA SAFETY: If button is to the right of the quantity display, it's likely plus
+                                            # (We only do this if we can find the quantity display nearby)
+                                        except Exception:
+                                            pass
+                                        try:
+                                            await btn.tap(timeout=2000, force=True)
+                                        except Exception:
+                                            await btn.click(timeout=2000, force=True)
+                                        decremented += 1
+                                        made_progress = True
+                                        await job_queue.log_job(job_id, LogLevel.INFO, f"Clicked minus button {idx+1}")
+                                        await asyncio.sleep(0.8)
+                                        # Re-scan after each decrement so we don't keep clicking stale controls.
+                                        break
+                                except Exception as e:
+                                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Failed to click minus {idx+1}: {e}")
+                                    continue
                     except Exception as e:
-                        await job_queue.log_job(job_id, LogLevel.DEBUG, f"Minus button search failed: {e}")
+                        await job_queue.log_job(job_id, LogLevel.DEBUG, f"Grocery removal logic failed: {e}")
 
                 # Wait for UI to update after removals
                 await asyncio.sleep(1.0)
@@ -882,23 +1157,37 @@ class CartManager:
 
     async def _verify_actual_quantity(self, page, job_id: int, product_link: str, max_retries: int = 5) -> int:
         """Verify the actual quantity displayed using quantity_display_selectors with robust retry logic"""
+        # Try to find the specific product card first to localize the search
+        container = page
+        if product_link:
+            try:
+                # Find the product card that contains this link
+                # We look for the link and then find its common container ancestor
+                # Using a broad selector for the product card/row
+                product_card = page.locator(f'div.css-175oi2r:has(a[href*="{product_link}"])').first
+                if await product_card.count() > 0:
+                    container = product_card
+                    await job_queue.log_job(job_id, LogLevel.DEBUG, f"Localizing quantity search to card for: {product_link}")
+            except Exception:
+                pass
+
         quantity_display_selectors = [
-            # Primary selector - most reliable
+            # Primary selector - most reliable React Native Web classes
+            '.r-1aockid',
             '.css-175oi2r.r-1awozwy.r-jwli3a.r-18u37iz.r-1m7hjod.r-1777fci.r-1aockid',
-            # Alternative selectors for different page states
-            '#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(3) > div:nth-child(2) > div:nth-child(2) > div > div.css-175oi2r.r-1awozwy.r-jwli3a.r-18u37iz.r-1m7hjod.r-1777fci.r-1aockid',
-            '#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div.css-175oi2r.r-1awozwy.r-jwli3a.r-18u37iz.r-1m7hjod.r-1777fci.r-1aockid',
+            'div:has-text("-") + div:not(:has-text("+"))', # The quantity number is often the next div after minus
+            'xpath=//div[contains(text(), "+")]/preceding-sibling::div[1]', # Using XPath for preceding-sibling
             # Generic selectors
             'div[class*="quantity"]:visible',
             'span[class*="quantity"]:visible',
             'div:has-text("Qty"):visible',
             'input[type="number"]:visible',
-            # Text-based fallbacks
-            'div:has-text("1"):visible',
-            'div:has-text("2"):visible',
-            'div:has-text("3"):visible',
-            'div:has-text("4"):visible',
-            'div:has-text("5"):visible'
+            # Text-based fallbacks - narrow them down to avoid matching prices
+            'div.r-1aockid:has-text("1")',
+            'div.r-1aockid:has-text("2")',
+            'div.r-1aockid:has-text("3")',
+            'div.r-1aockid:has-text("4")',
+            'div.r-1aockid:has-text("5")'
         ]
         
         import re
@@ -911,7 +1200,7 @@ class CartManager:
             
             for i, selector in enumerate(quantity_display_selectors):
                 try:
-                    quantity_element = page.locator(selector)
+                    quantity_element = container.locator(selector)
                     element_count = await quantity_element.count()
                     
                     if element_count > 0:
@@ -959,15 +1248,17 @@ class CartManager:
     async def _adjust_product_quantity(self, page, desired_quantity: int, job_id: int, product_link: str, max_retries: int = 3) -> bool:
         """Helper method to adjust product quantity using mobile grocery selectors with enhanced reliability"""
         minus_button_selectors = [
-            "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(3) > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(1) > div",
-            "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(1) > div",
+            'div:has(+ div.r-1aockid):has-text("-")', 
+            'div:text-is("-"):visible',
             'div:has-text("-"):visible',
-            '[role="button"]:has-text("-"):visible'
+            'div.css-175oi2r:has-text("-"):not(:has-text("+"))', # Stricter
+            'div:left-of(div.r-1aockid)'
         ]
         
         plus_button_selectors = [
-            "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(3) > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(3) > div > div.css-175oi2r.r-1awozwy.r-1p0dtai.r-1777fci.r-1d2f490.r-u8s1d.r-zchlnj.r-ipm5af",
-            "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(3) > div > div.css-175oi2r.r-1awozwy.r-1p0dtai.r-1777fci.r-1d2f490.r-u8s1d.r-zchlnj.r-ipm5af",
+            'div.r-1aockid + div', 
+            'div:right-of(div.r-1aockid)', 
+            'div:text-is("+"):visible',
             'div:has-text("+"):visible',
             '[role="button"]:has-text("+"):visible'
         ]
@@ -1005,8 +1296,9 @@ class CartManager:
                                 await plus_button.scroll_into_view_if_needed()
                                 await asyncio.sleep(0.3)
                                 try:
-                                    await plus_button.click(timeout=2000)
-                                    await job_queue.log_job(job_id, LogLevel.INFO, f"➕ Plus button clicked (selector #{i+1})")
+                                    # Use native tap for RN Web mobile
+                                    await plus_button.first.tap(timeout=5000, force=True)
+                                    await job_queue.log_job(job_id, LogLevel.INFO, f"➕ Plus button tapped natively (selector #{i+1})")
                                     # No popup scanning here to keep it fast; we'll react only on failures or no-change
                                     plus_clicked = True
                                     break
@@ -1090,11 +1382,19 @@ class CartManager:
                         try:
                             minus_button = page.locator(selector)
                             if await minus_button.count() > 0 and await minus_button.is_visible():
+                                # EXTRA SAFETY: Check text content to ensure it's not a plus button
+                                try:
+                                    txt = (await minus_button.first.inner_text()).strip()
+                                    if "+" in txt and "-" not in txt:
+                                        await job_queue.log_job(job_id, LogLevel.DEBUG, f"🚫 Skipping PLUS button mistakenly identified as minus in adjustment: '{txt}'")
+                                        continue
+                                except Exception:
+                                    pass
+
                                 await minus_button.scroll_into_view_if_needed()
                                 await asyncio.sleep(0.3)
-                                
-                                await minus_button.click(timeout=3000)
-                                await job_queue.log_job(job_id, LogLevel.INFO, f"➖ Minus button clicked (selector #{i+1})")
+                                await minus_button.first.tap(timeout=5000, force=True)
+                                await job_queue.log_job(job_id, LogLevel.INFO, f"➖ Minus button tapped natively (selector #{i+1})")
                                 minus_clicked = True
                                 break
                         except Exception as e:
@@ -1338,7 +1638,9 @@ class CartManager:
                 add_button_selectors = [
                     # Priority 0: Exact text 'Add to cart' (most reliable for recent structure)
                     'text="Add to cart"',
-                    # Priority 1: Specific class combination found in the provide HTML
+                    # Priority 1: Exact text 'Add' (highly reliable for Grocery)
+                    'text="Add"',
+                    # Priority 2: Specific class combination found in the provide HTML
                     '.css-146c3p1.r-dnmrzs.r-1udh08x.r-1udbk01.r-3s2u2q.r-1iln25a',
                     # Priority 2: Style-based selector provided by user
                     'div[style*="border-radius: 0px"][style*="background: linear-gradient(90deg, rgb(255, 255, 255), rgb(255, 255, 255))"]',
@@ -1372,8 +1674,11 @@ class CartManager:
                             await asyncio.sleep(0.5)
                             
                             try:
-                                await add_button_element.click(timeout=8000)
-                                await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Add button clicked successfully using strategy #{i+1}")
+                                # Mobile Web / React Native Web often uses touchable layers over text.
+                                # Playwright's .tap() generates full touch event clusters (with touches[] array) which RN Web expects.
+                                await add_button_element.tap(timeout=5000, force=True)
+                                await job_queue.log_job(job_id, LogLevel.INFO, f"✅ Add button tapped natively using strategy #{i+1}")
+                                
                                 click_success = True
                                 break # Success! Exit the selector loop
                             except Exception as click_err:
@@ -1407,22 +1712,40 @@ class CartManager:
 
                     
                     # Verify that the product was actually added by checking for quantity controls
-                    plus_button_selector = "#_parentCtr_ > div:nth-child(2) > div > div > div > div:nth-child(1) > div:nth-child(2) > div:nth-child(2) > div:nth-child(2) > div > div:nth-child(3) > div > div.css-175oi2r.r-1awozwy.r-1p0dtai.r-1777fci.r-1d2f490.r-u8s1d.r-zchlnj.r-ipm5af"
-                    
-                    # Also check for alternative quantity control indicators
+                    # or other indicators like the basket badge.
                     quantity_indicators = [
-                        plus_button_selector,
+                        'div:text-is("+")',
+                        'div:text-is("-")',
                         'div:has-text("+")',
                         'div:has-text("-")',
-                        '.css-175oi2r.r-1awozwy.r-jwli3a.r-18u37iz.r-1m7hjod.r-1777fci.r-1aockid'  # quantity display
+                        'div.r-1aockid', # Common RN Web quantity display class
+                        'div[style*="background-color: rgb(255, 61, 0)"]', # Red badge color
+                        'div[style*="background-color: rgba(255, 61, 0, 1.00)"]',
+                        'div:has-text("Go to Basket")',
+                        'div:has-text("Saved")' # Sometimes shows "Saved for later" or similar if logic changes
                     ]
                     
                     product_added = False
                     for indicator in quantity_indicators:
-                        if await page.locator(indicator).count() > 0:
-                            product_added = True
-                            await job_queue.log_job(job_id, LogLevel.INFO, f"Product successfully added to cart - quantity controls detected")
-                            break
+                        try:
+                            if await page.locator(indicator).count() > 0:
+                                product_added = True
+                                await job_queue.log_job(job_id, LogLevel.INFO, f"Product successfully added to cart - '{indicator}' indicator detected")
+                                break
+                        except:
+                            continue
+                    
+                    # High-confidence verification: Check if the "Basket" text turned into a Price (e.g. ₹960)
+                    if not product_added:
+                        try:
+                            basket_price_indicator = page.locator('div:has-text("₹")').last
+                            if await basket_price_indicator.count() > 0:
+                                price_text = await basket_price_indicator.inner_text()
+                                if "₹" in price_text:
+                                    product_added = True
+                                    await job_queue.log_job(job_id, LogLevel.INFO, f"Product successfully added to cart - Price {price_text} found in basket area")
+                        except:
+                            pass
                     
                     if not product_added:
                         # Additional verification attempts
@@ -1505,8 +1828,21 @@ class CartManager:
             await job_queue.log_job(job_id, LogLevel.INFO, f"Navigating to {marketplace.lower()} cart...")
             cart_url = f"https://www.flipkart.com/viewcart?marketplace={marketplace}"
             await page.goto(cart_url, timeout=60000)
-            await page.wait_for_load_state('domcontentloaded')
-            await asyncio.sleep(3)
+            await page.wait_for_load_state('networkidle')
+            await asyncio.sleep(5) # Increased wait for Grocery basket sync
+            
+            # Stale Cart Check: If it says empty but we just added items, reload
+            empty_text = page.locator('text="Your basket is empty!", text="Your cart is empty!"')
+            basket_badge = page.locator('div[style*="background-color: rgb(255, 61, 0)"], div[style*="background-color: rgba(255, 61, 0, 1.00)"]')
+            
+            if await empty_text.count() > 0 and added_products > 0:
+                await job_queue.log_job(job_id, LogLevel.WARNING, "⚠️ Cart appears empty despite additions. Attempting reload...")
+                await page.reload()
+                await asyncio.sleep(4)
+                if await empty_text.count() > 0 and await basket_badge.count() > 0:
+                     await job_queue.log_job(job_id, LogLevel.INFO, "🔄 Basket still shows empty but badge exists, clicking Basket icon...")
+                     await basket_badge.last.click()
+                     await asyncio.sleep(3)
 
         # For Flipkart, adjust quantities in the cart
         if automation_mode == "FLIPKART":
@@ -1711,4 +2047,3 @@ class CartManager:
         except Exception as e:
             await job_queue.log_job(job_id, LogLevel.ERROR, f"Error adjusting cart quantities: {str(e)}")
             return False
-

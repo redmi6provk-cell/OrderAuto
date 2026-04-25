@@ -537,8 +537,16 @@ class CheckoutHandler:
             except Exception:
                 delivery_address_name = None
 
-            # Step 0: Apply offers on cart page
-            await job_queue.log_job(job_id, LogLevel.INFO, "Step 0: Applying available offers...")
+            # Step 0: Initial Cart State Check
+            await job_queue.log_job(job_id, LogLevel.INFO, "Step 0: Checking cart state...")
+            empty_text = page.locator('text="Your basket is empty!", text="Your cart is empty!"')
+            if await empty_text.count() > 0:
+                await job_queue.log_job(job_id, LogLevel.WARNING, "⚠️ Cart appears empty at start of Phase 3. Reloading...")
+                await page.reload()
+                await asyncio.sleep(4)
+            
+            # Step 0.1: Apply offers on cart page
+            await job_queue.log_job(job_id, LogLevel.INFO, "Step 0.1: Applying available offers...")
             
             # Prefer robust text-based locator for the "Apply" action
             try:
@@ -591,9 +599,10 @@ class CheckoutHandler:
                 f'text="{primary_button_text}"',
                 f'div.css-1rynq56:has-text("{primary_button_text}")',
                 f'div[role="button"]:has-text("{primary_button_text}")',
-                # Grocery-specific Continue button
+                # Grocery-specific Continue button (fixed at bottom usually)
+                'div[style*="background-color: rgb(251, 100, 27)"]', # Orange Continue button color
+                'div:text-is("Continue")',
                 'div.css-175oi2r.r-1awozwy.r-1kneemv:has-text("Continue")',
-                # Regular Flipkart Place Order button
                 'button:has-text("Place Order")',
                 'div.HaReuk div.cDeXU9 button',
                 # Fallbacks from previous logic

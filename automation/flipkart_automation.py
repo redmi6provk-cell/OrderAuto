@@ -326,10 +326,19 @@ class FlipkartAutomation:
     async def _is_logged_in(self, page: Page) -> bool:
         """Check if user is logged in"""
         try:
+            # Check if explicit Login buttons are visible
+            login_buttons = [
+                'text="Login"',
+                'a[href*="/login"]'
+            ]
+            for login_btn in login_buttons:
+                if await page.locator(login_btn).count() > 0 and await page.locator(login_btn).first.is_visible():
+                    return False
+                    
             # Look for user account indicators
             account_indicators = [
-                'text=My Account',
-                'text=Account',
+                'text="My Account"',
+                'text="Account"',
                 '[data-testid="account-menu"]',
                 'button[aria-label="Account"]'
             ]
@@ -408,6 +417,7 @@ class FlipkartAutomation:
             add_to_cart_selectors = [
                 'text=Add to Cart',
                 'text=ADD TO CART',
+                'text="Add"',
                 'button[class*="cart"]'
             ]
             
@@ -434,8 +444,23 @@ class FlipkartAutomation:
                 return OrderResult(success=False, error="Product not available")
             
             # Add to cart
-            add_to_cart_btn = page.locator('text=Add to Cart').first
-            await add_to_cart_btn.click()
+            add_to_cart_selectors = [
+                'text=Add to Cart',
+                'text=ADD TO CART',
+                'text="Add"',
+                'button[class*="cart"]'
+            ]
+            added = False
+            for selector in add_to_cart_selectors:
+                add_to_cart_btn = page.locator(selector).first
+                if await add_to_cart_btn.count() > 0:
+                    await add_to_cart_btn.click()
+                    added = True
+                    break
+            
+            if not added:
+                return OrderResult(success=False, error="Could not find Add to Cart button")
+                
             await page.wait_for_timeout(3000)
             
             # Go to cart

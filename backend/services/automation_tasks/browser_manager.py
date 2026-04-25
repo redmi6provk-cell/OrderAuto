@@ -10,6 +10,7 @@ import os
 import random
 from datetime import datetime
 from typing import Dict, Any, Optional
+import tempfile
 
 from services.job_queue import job_queue, LogLevel
 from database import db
@@ -111,7 +112,8 @@ class BrowserManager:
 
         try:
             # Create unique user data directory for this session
-            user_data_dir = f"/tmp/flipkart_automation_job_{job_id}_{email.replace('@', '_').replace('.', '_')}"
+            safe_email = email.replace('@', '_').replace('.', '_')
+            user_data_dir = os.path.join(tempfile.gettempdir(), f"flipkart_automation_job_{job_id}_{safe_email}")
             os.makedirs(user_data_dir, exist_ok=True)
             
             # Build a realistic user agent based on actual Chromium version
@@ -375,7 +377,7 @@ class BrowserManager:
                 return None
             
             # Create screenshot with descriptive name (use JPEG + reduced quality by default)
-            screenshot_path = f"/tmp/flipkart_mobile_login_fail_{job_id}_{reason}.jpg"
+            screenshot_path = os.path.join(tempfile.gettempdir(), f"flipkart_mobile_login_fail_{job_id}_{reason}.jpg")
             await page.screenshot(
                 path=screenshot_path,
                 full_page=self.screenshot_full_page,
